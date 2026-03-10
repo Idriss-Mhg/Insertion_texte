@@ -136,9 +136,14 @@ class App(tk.Tk):
           2. Navigation entre les fichiers (◀ / ▶)
           3. Sélection du code d'insertion et édition de la clause
           4. Barre de recherche de section
-          5. PanedWindow : listbox des paragraphes | prévisualisation HTML
-          6. Boutons d'action (Insérer / Passer)
-          7. Historique des insertions (log)
+          5. Historique des insertions (log)        ← packés en BOTTOM en premier
+          6. Boutons d'action (Insérer / Passer)    ← packés en BOTTOM en second
+          7. PanedWindow listbox | prévisualisation  ← expand=True, remplit le reste
+
+        Règle critique pack : les widgets side=BOTTOM doivent être packés AVANT
+        tout widget avec expand=True. Sinon le PanedWindow consomme tout l'espace
+        et les boutons/log disparaissent. On pack donc log et actions en premier,
+        puis le PanedWindow en dernier.
         """
         pad = {"padx": 8, "pady": 4}
 
@@ -190,7 +195,49 @@ class App(tk.Tk):
         self._subtitle_var = tk.StringVar()
         ttk.Entry(row1, textvariable=self._subtitle_var, width=30).pack(side=tk.LEFT, padx=4)
 
-        ttk.Label(f_clause, text="Texte de la clause :").pack(anchor=tk.W, padx=6)
+        # ── Format du sous-titre ──────────────────────────────────────────────
+        row_fmt = ttk.Frame(f_clause)
+        row_fmt.pack(fill=tk.X, padx=6, pady=(2, 0))
+
+        ttk.Label(row_fmt, text="Format s-titre :").pack(side=tk.LEFT)
+        self._subtitle_type_var = tk.StringVar(value="bold")
+
+        # Radio "Gras"
+        ttk.Radiobutton(row_fmt, text="Gras", variable=self._subtitle_type_var,
+                        value="bold", command=self._on_subtitle_type_change).pack(side=tk.LEFT, padx=(6, 2))
+
+        # Radio + combobox "Style Word"
+        ttk.Radiobutton(row_fmt, text="Style Word", variable=self._subtitle_type_var,
+                        value="style", command=self._on_subtitle_type_change).pack(side=tk.LEFT, padx=(8, 2))
+        self._subtitle_style_var = tk.StringVar(value="Heading 3")
+        self._cb_subtitle_style = ttk.Combobox(
+            row_fmt, textvariable=self._subtitle_style_var, width=14,
+            values=["Heading 1", "Heading 2", "Heading 3", "Heading 4",
+                    "Titre 1", "Titre 2", "Titre 3", "Titre 4",
+                    "Normal", "Corps de texte"])
+        self._cb_subtitle_style.pack(side=tk.LEFT, padx=(0, 8))
+
+        # Radio + options "À puce"
+        ttk.Radiobutton(row_fmt, text="À puce", variable=self._subtitle_type_var,
+                        value="puce", command=self._on_subtitle_type_change).pack(side=tk.LEFT, padx=(8, 2))
+        self._subtitle_bullet_var = tk.StringVar(value="•")
+        ttk.Combobox(row_fmt, textvariable=self._subtitle_bullet_var, width=3,
+                     values=["•", "–", "-", "○", "▪", "◦", "→"]).pack(side=tk.LEFT)
+        ttk.Label(row_fmt, text="Niv.").pack(side=tk.LEFT, padx=(6, 2))
+        self._subtitle_indent_var = tk.IntVar(value=1)
+        ttk.Spinbox(row_fmt, from_=1, to=3, textvariable=self._subtitle_indent_var,
+                    width=3).pack(side=tk.LEFT)
+
+        # ── Style du texte principal ──────────────────────────────────────────
+        row_ts = ttk.Frame(f_clause)
+        row_ts.pack(fill=tk.X, padx=6, pady=(2, 0))
+        ttk.Label(row_ts, text="Style texte :").pack(side=tk.LEFT)
+        self._text_style_var = tk.StringVar(value="Normal")
+        ttk.Combobox(row_ts, textvariable=self._text_style_var, width=20,
+                     values=["Normal", "Corps de texte", "Body Text",
+                             "Heading 4", "Titre 4"]).pack(side=tk.LEFT, padx=6)
+
+        ttk.Label(f_clause, text="Texte de la clause :").pack(anchor=tk.W, padx=6, pady=(4, 0))
         self._txt_clause = tk.Text(f_clause, height=4, wrap=tk.WORD)
         self._txt_clause.pack(fill=tk.X, padx=6, pady=(0, 6))
 
@@ -210,9 +257,36 @@ class App(tk.Tk):
         # "Afficher tout" remet la listbox en mode complet sans filtre
         ttk.Button(row2, text="Afficher tout", command=self._show_all).pack(side=tk.LEFT, padx=4)
 
-        # ── 5. PanedWindow : listbox + prévisualisation ───────────────────────
-        # Le PanedWindow est redimensionnable par l'utilisateur (poignée centrale).
-        # Poids : listbox=1, preview=2 → la preview est deux fois plus large par défaut.
+        # ── 5. Historique des insertions ──────────────────────────────────────
+        # Packé en BOTTOM avant le PanedWindow (expand=True) pour qu'il ne soit
+        # pas écrasé : avec pack, les widgets BOTTOM sont réservés en premier.
+        f_log = ttk.LabelFrame(parent, text="Historique des insertions")
+        f_log.pack(side=tk.BOTTOM, fill=tk.X, **pad)
+
+        # Widget en lecture seule : on l'active brièvement pour écrire dedans
+        self._txt_log = tk.Text(f_log, height=4, state=tk.DISABLED, font=("Courier", 8), foreground="#444")
+        self._txt_log.pack(fill=tk.X, padx=4, pady=4)
+
+        # ── 6. Boutons d'action ───────────────────────────────────────────────
+        # Également packé en BOTTOM, avant le PanedWindow.
+        f_actions = ttk.Frame(parent)
+        f_actions.pack(side=tk.BOTTOM, fill=tk.X, **pad)
+
+        ttk.Button(f_actions, text="Insérer la clause", command=self._insert).pack(side=tk.LEFT)
+        # "Passer" avance au fichier suivant sans modifier le document courant
+        ttk.Button(f_actions, text="Passer (sans insérer)", command=self._next_file).pack(side=tk.LEFT, padx=8)
+
+        # Auteur affiché dans la bulle de révision Word (mode Track Changes)
+        ttk.Label(f_actions, text="Auteur :").pack(side=tk.LEFT, padx=(16, 4))
+        self._author_var = tk.StringVar(value="Juriste")
+        ttk.Entry(f_actions, textvariable=self._author_var, width=16).pack(side=tk.LEFT)
+
+        self._lbl_status = ttk.Label(f_actions, text="", foreground="gray")
+        self._lbl_status.pack(side=tk.LEFT, padx=12)
+
+        # ── 7. PanedWindow : listbox + prévisualisation ───────────────────────
+        # Packé en dernier avec expand=True : il occupe tout l'espace restant
+        # entre les sections fixes du haut et les boutons/log du bas.
         paned = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, **pad)
 
@@ -240,24 +314,6 @@ class App(tk.Tk):
         self._html_frame = HtmlFrame(f_preview, messages_enabled=False)
         self._html_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
         self._html_frame.load_html("<body style='color:gray;padding:16px'>Aucun document chargé.</body>")
-
-        # ── 6. Boutons d'action ───────────────────────────────────────────────
-        f_actions = ttk.Frame(parent)
-        f_actions.pack(fill=tk.X, **pad)
-
-        ttk.Button(f_actions, text="Insérer la clause", command=self._insert).pack(side=tk.LEFT)
-        # "Passer" avance au fichier suivant sans modifier le document courant
-        ttk.Button(f_actions, text="Passer (sans insérer)", command=self._next_file).pack(side=tk.LEFT, padx=8)
-        self._lbl_status = ttk.Label(f_actions, text="", foreground="gray")
-        self._lbl_status.pack(side=tk.LEFT, padx=12)
-
-        # ── 7. Historique des insertions ──────────────────────────────────────
-        f_log = ttk.LabelFrame(parent, text="Historique des insertions")
-        f_log.pack(fill=tk.X, **pad)
-
-        # Widget en lecture seule : on l'active brièvement pour écrire dedans
-        self._txt_log = tk.Text(f_log, height=4, state=tk.DISABLED, font=("Courier", 8), foreground="#444")
-        self._txt_log.pack(fill=tk.X, padx=4, pady=4)
 
     # -------------------------------------------------------------------------
     # Onglet 2 — Éditeur de clauses
@@ -303,7 +359,7 @@ class App(tk.Tk):
         f_right = ttk.LabelFrame(parent, text="Édition")
         f_right.grid(row=0, column=1, sticky="nsew", padx=(4, 8), pady=8)
         f_right.columnconfigure(1, weight=1)
-        f_right.rowconfigure(3, weight=1)  # La zone de texte occupe l'espace restant
+        f_right.rowconfigure(5, weight=1)  # La zone de texte occupe l'espace restant
 
         ttk.Label(f_right, text="Code :").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
         self._edit_name_var = tk.StringVar()
@@ -314,16 +370,55 @@ class App(tk.Tk):
         self._edit_subtitle_var = tk.StringVar()
         ttk.Entry(f_right, textvariable=self._edit_subtitle_var).grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=4)
 
-        ttk.Label(f_right, text="Texte de la clause :").grid(row=2, column=0, sticky="nw", padx=8, pady=4)
+        # ── Format du sous-titre ──────────────────────────────────────────────
+        f_fmt = ttk.Frame(f_right)
+        f_fmt.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 4))
 
-        self._edit_txt = tk.Text(f_right, wrap=tk.WORD, height=12)
+        ttk.Label(f_fmt, text="Format :").pack(side=tk.LEFT)
+        self._edit_subtitle_type_var = tk.StringVar(value="bold")
+
+        ttk.Radiobutton(f_fmt, text="Gras", variable=self._edit_subtitle_type_var,
+                        value="bold", command=self._on_edit_subtitle_type_change).pack(side=tk.LEFT, padx=(6, 2))
+
+        ttk.Radiobutton(f_fmt, text="Style Word", variable=self._edit_subtitle_type_var,
+                        value="style", command=self._on_edit_subtitle_type_change).pack(side=tk.LEFT, padx=(8, 2))
+        self._edit_subtitle_style_var = tk.StringVar(value="Heading 3")
+        self._edit_cb_style = ttk.Combobox(
+            f_fmt, textvariable=self._edit_subtitle_style_var, width=14,
+            values=["Heading 1", "Heading 2", "Heading 3", "Heading 4",
+                    "Titre 1", "Titre 2", "Titre 3", "Titre 4",
+                    "Normal", "Corps de texte"])
+        self._edit_cb_style.pack(side=tk.LEFT, padx=(0, 8))
+
+        ttk.Radiobutton(f_fmt, text="À puce", variable=self._edit_subtitle_type_var,
+                        value="puce", command=self._on_edit_subtitle_type_change).pack(side=tk.LEFT, padx=(8, 2))
+        self._edit_subtitle_bullet_var = tk.StringVar(value="•")
+        ttk.Combobox(f_fmt, textvariable=self._edit_subtitle_bullet_var, width=3,
+                     values=["•", "–", "-", "○", "▪", "◦", "→"]).pack(side=tk.LEFT)
+        ttk.Label(f_fmt, text="Niv.").pack(side=tk.LEFT, padx=(6, 2))
+        self._edit_subtitle_indent_var = tk.IntVar(value=1)
+        ttk.Spinbox(f_fmt, from_=1, to=3, textvariable=self._edit_subtitle_indent_var,
+                    width=3).pack(side=tk.LEFT)
+
+        # ── Style du texte principal ──────────────────────────────────────────
+        f_ts = ttk.Frame(f_right)
+        f_ts.grid(row=3, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 4))
+        ttk.Label(f_ts, text="Style texte :").pack(side=tk.LEFT)
+        self._edit_text_style_var = tk.StringVar(value="Normal")
+        ttk.Combobox(f_ts, textvariable=self._edit_text_style_var, width=20,
+                     values=["Normal", "Corps de texte", "Body Text",
+                             "Heading 4", "Titre 4"]).pack(side=tk.LEFT, padx=6)
+
+        ttk.Label(f_right, text="Texte de la clause :").grid(row=4, column=0, sticky="nw", padx=8, pady=4)
+
+        self._edit_txt = tk.Text(f_right, wrap=tk.WORD, height=10)
         sb_r = ttk.Scrollbar(f_right, orient=tk.VERTICAL, command=self._edit_txt.yview)
         self._edit_txt.config(yscrollcommand=sb_r.set)
-        self._edit_txt.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=8, pady=(0, 4))
-        sb_r.grid(row=3, column=2, sticky="ns", pady=(0, 4))
+        self._edit_txt.grid(row=5, column=0, columnspan=2, sticky="nsew", padx=8, pady=(0, 4))
+        sb_r.grid(row=5, column=2, sticky="ns", pady=(0, 4))
 
         f_form_btns = ttk.Frame(f_right)
-        f_form_btns.grid(row=4, column=0, columnspan=3, sticky="ew", padx=8, pady=(0, 8))
+        f_form_btns.grid(row=6, column=0, columnspan=3, sticky="ew", padx=8, pady=(0, 8))
         ttk.Button(f_form_btns, text="Enregistrer", command=self._clause_save).pack(side=tk.LEFT)
         ttk.Button(f_form_btns, text="Annuler",     command=self._clause_cancel).pack(side=tk.LEFT, padx=8)
         self._lbl_clause_status = ttk.Label(f_form_btns, text="", foreground="gray")
@@ -365,9 +460,20 @@ class App(tk.Tk):
         self._clause_editing_original_name = name
         self._edit_name_var.set(name)
         self._edit_subtitle_var.set(data.get("subtitle", ""))
+        self._edit_subtitle_type_var.set(data.get("subtitle_type", "bold"))
+        self._edit_subtitle_style_var.set(data.get("subtitle_style", "Heading 3"))
+        self._edit_subtitle_bullet_var.set(data.get("subtitle_bullet", "•"))
+        self._edit_subtitle_indent_var.set(data.get("subtitle_indent", 1))
+        self._edit_text_style_var.set(data.get("text_style", "Normal"))
         self._edit_txt.delete("1.0", tk.END)
         self._edit_txt.insert("1.0", data.get("text", ""))
+        self._on_edit_subtitle_type_change()
         self._lbl_clause_status.config(text="")
+
+    def _on_edit_subtitle_type_change(self, *_):
+        """Active/désactive le combobox style Word dans l'éditeur de clauses."""
+        t = self._edit_subtitle_type_var.get()
+        self._edit_cb_style.config(state="normal" if t == "style" else "disabled")
 
     def _clause_new(self):
         """Réinitialise le formulaire pour la saisie d'un nouveau code d'insertion."""
@@ -411,6 +517,15 @@ class App(tk.Tk):
 
         subtitle = self._edit_subtitle_var.get().strip()
         text = self._edit_txt.get("1.0", tk.END).strip()
+        entry = {
+            "subtitle": subtitle,
+            "subtitle_type": self._edit_subtitle_type_var.get(),
+            "subtitle_style": self._edit_subtitle_style_var.get().strip(),
+            "subtitle_bullet": self._edit_subtitle_bullet_var.get(),
+            "subtitle_indent": self._edit_subtitle_indent_var.get(),
+            "text": text,
+            "text_style": self._edit_text_style_var.get().strip() or "Normal",
+        }
         original = self._clause_editing_original_name
 
         if original and original != new_name:
@@ -420,7 +535,7 @@ class App(tk.Tk):
                 if not messagebox.askyesno("Confirmer", f"« {new_name} » existe déjà. Écraser ?"):
                     return
             self._clauses = {
-                (new_name if k == original else k): ({"subtitle": subtitle, "text": text} if k == original else v)
+                (new_name if k == original else k): (entry if k == original else v)
                 for k, v in self._clauses.items()
             }
         else:
@@ -428,7 +543,7 @@ class App(tk.Tk):
             if new_name in self._clauses and original is None:
                 if not messagebox.askyesno("Confirmer", f"« {new_name} » existe déjà. Écraser ?"):
                     return
-            self._clauses[new_name] = {"subtitle": subtitle, "text": text}
+            self._clauses[new_name] = entry
 
         _save_clauses(self._clauses)
         self._clause_editing_original_name = new_name
@@ -554,14 +669,25 @@ class App(tk.Tk):
 
     def _on_code_change(self, *_):
         """
-        Pré-remplit les champs sous-titre et texte de la clause
-        à partir du code d'insertion sélectionné dans le combobox.
+        Pré-remplit tous les champs (sous-titre, format, texte, styles) à partir
+        du code d'insertion sélectionné dans le combobox.
         """
         code = self._fund_var.get()
         data = self._clauses.get(code, {})
         self._subtitle_var.set(data.get("subtitle", ""))
+        self._subtitle_type_var.set(data.get("subtitle_type", "bold"))
+        self._subtitle_style_var.set(data.get("subtitle_style", "Heading 3"))
+        self._subtitle_bullet_var.set(data.get("subtitle_bullet", "•"))
+        self._subtitle_indent_var.set(data.get("subtitle_indent", 1))
+        self._text_style_var.set(data.get("text_style", "Normal"))
         self._txt_clause.delete("1.0", tk.END)
         self._txt_clause.insert("1.0", data.get("text", ""))
+        self._on_subtitle_type_change()
+
+    def _on_subtitle_type_change(self, *_):
+        """Active/désactive le combobox style Word selon le type de sous-titre choisi."""
+        t = self._subtitle_type_var.get()
+        self._cb_subtitle_style.config(state="normal" if t == "style" else "disabled")
 
     # =========================================================================
     # Logique de l'onglet Insertion — Recherche et listbox
@@ -748,14 +874,26 @@ class App(tk.Tk):
         para_idx = self._para_indices[selection[0]]
         subtitle = self._subtitle_var.get().strip()
         clause_text = self._txt_clause.get("1.0", tk.END).strip()
+        author = self._author_var.get().strip() or "Juriste"
 
         if not clause_text:
             messagebox.showwarning("Attention", "Le texte de la clause est vide.")
             return
 
+        subtitle_config = {
+            "type":   self._subtitle_type_var.get(),
+            "style":  self._subtitle_style_var.get(),
+            "bullet": self._subtitle_bullet_var.get(),
+            "indent": self._subtitle_indent_var.get(),
+        }
+        text_style = self._text_style_var.get().strip() or None
+
         filepath = str(self._queue[self._queue_idx])
         try:
-            docx_handler.insert_clause_after(self._doc, para_idx, subtitle, clause_text)
+            docx_handler.insert_clause_after(
+                self._doc, para_idx, subtitle, clause_text, author,
+                subtitle_config=subtitle_config, text_style=text_style
+            )
             docx_handler.save_document(self._doc, filepath)
             logger.log_insertion(filepath, self._fund_var.get(), para_idx, subtitle, clause_text)
             self._status(f"Clause insérée après §{para_idx}. Passage au fichier suivant…")

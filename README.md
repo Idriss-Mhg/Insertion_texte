@@ -29,11 +29,13 @@ précisément du point d'insertion, fichier par fichier.
 - **Sélection de dossier** : charge en une fois tous les `.docx` d'un dossier réseau
 - **Navigation fichier par fichier** : boutons ◀ Précédent / Suivant ▶ avec compteur `x / n`
 - **Sauvegarde automatique** : avant toute modification, une copie `_old.docx` est créée dans `_sauvegardes/`
-- **Sélection du code d'insertion** : combobox pré-rempli avec les clauses configurées — sous-titre et texte se chargent automatiquement et restent éditables
+- **Sélection du code d'insertion** : combobox pré-rempli avec les clauses configurées — tous les champs se chargent automatiquement et restent éditables
 - **Recherche de section** : saisir un mot-clé pour localiser la section cible ; les paragraphes correspondants sont surlignés en jaune dans la listbox
 - **Affichage tout** : affiche l'intégralité des paragraphes du document sans filtre
 - **Point d'insertion** : cliquer sur un paragraphe dans la listbox = insérer la clause **après** ce paragraphe
 - **Prévisualisation HTML** : rendu du document en temps réel à droite ; le paragraphe sélectionné est mis en évidence (fond jaune, barre orange) avec scroll automatique
+- **Mode révision Word (Track Changes)** : toute insertion est balisée `<w:ins>` dans le XML OOXML — elle apparaît en mode révision dans Word, avec le nom de l'auteur et la date
+- **Champ Auteur** : le nom saisi est affiché dans la bulle de révision Word (défaut : « Juriste »)
 - **Insertion** : écrase le `.docx` original, journalise l'opération, passe au fichier suivant
 - **Passer sans insérer** : avancer au fichier suivant sans modifier le document courant
 - **Historique** : les 20 dernières insertions sont affichées en bas de l'écran
@@ -69,7 +71,7 @@ Insertion_texte/
 ├── src/
 │   ├── __init__.py
 │   ├── app.py               # Interface graphique (Tkinter) — logique UI complète
-│   ├── docx_handler.py      # Manipulation .docx (lecture, insertion, HTML)
+│   ├── docx_handler.py      # Manipulation .docx (lecture, insertion Track Changes, HTML)
 │   └── logger.py            # Journalisation CSV des insertions
 │
 └── logs/
@@ -99,19 +101,25 @@ La convention de nommage recommandée est `CAMPAGNE_TYPEFONDS`
 {
   "LMT_OPCVM": {
     "subtitle": "Outils de gestion de la liquidité (LMT)",
-    "text": "La société de gestion peut, dans des circonstances..."
-  },
-  "LMT_FIA": {
-    "subtitle": "Gestion du risque de liquidité",
-    "text": "Conformément à l'article L. 214-24-41..."
+    "subtitle_type": "style",
+    "subtitle_style": "Heading 3",
+    "subtitle_bullet": "•",
+    "subtitle_indent": 1,
+    "text": "La société de gestion peut, dans des circonstances...",
+    "text_style": "Normal"
   }
 }
 ```
 
 | Champ | Obligatoire | Description |
 |---|---|---|
-| `subtitle` | Non | Inséré en **gras** juste avant le corps de la clause. Laisser `""` si pas de sous-titre. |
+| `subtitle` | Non | Texte du sous-titre. Laisser `""` si pas de sous-titre. |
+| `subtitle_type` | Non | Format du sous-titre : `"bold"` (gras), `"style"` (style Word nommé) ou `"puce"` (puce avec indentation). Défaut : `"bold"`. |
+| `subtitle_style` | Non | Nom du style Word appliqué quand `subtitle_type = "style"` (ex. `"Heading 3"`, `"Titre 2"`). |
+| `subtitle_bullet` | Non | Caractère de puce quand `subtitle_type = "puce"` (ex. `"•"`, `"–"`, `"→"`). |
+| `subtitle_indent` | Non | Niveau d'indentation de la puce (1, 2 ou 3). Correspond respectivement à 0.5, 1 et 1.5 pouce. |
 | `text` | Oui | Corps de la clause. Texte brut, sans mise en forme. |
+| `text_style` | Non | Style Word du corps de clause (ex. `"Normal"`, `"Corps de texte"`). Défaut : `"Normal"`. |
 
 ---
 
@@ -189,6 +197,49 @@ de l'exécutable pour que les clauses soient éditables sans repackager.
 ---
 
 ## Notes techniques
+
+### Insertion en mode révision Word (Track Changes)
+
+L'insertion utilise le mécanisme natif de révision d'Office Open XML. Chaque nouveau
+paragraphe est balisé avec `<w:ins>` portant un identifiant de révision unique, le nom
+de l'auteur et la date UTC :
+
+```xml
+<w:p>
+  <w:pPr>
+    [<w:pStyle w:val="Heading 3"/>]   <!-- si sous-titre de type "Style Word" -->
+    [<w:ind w:left="720"/>]           <!-- si sous-titre de type "À puce" -->
+    <w:rPr>
+      <w:ins w:id="N" w:author="Juriste" w:date="2026-03-10T14:32:00Z"/>
+    </w:rPr>
+  </w:pPr>
+  <w:ins w:id="N+1" w:author="Juriste" w:date="2026-03-10T14:32:00Z">
+    <w:r>
+      [<w:rPr><w:b/></w:rPr>]         <!-- si sous-titre de type "Gras" -->
+      <w:t>texte inséré</w:t>
+    </w:r>
+  </w:ins>
+</w:p>
+```
+
+Quand le document est ouvert dans Word, la clause apparaît surlignée (couleur de révision),
+avec une bulle latérale indiquant l'auteur. Le juriste peut accepter ou refuser la modification.
+
+Les identifiants de révision `w:id` doivent être uniques dans le document. L'outil scanne
+le XML complet pour trouver le maximum existant et incrémente à partir de là.
+
+### Format du sous-titre
+
+Trois modes sont disponibles, configurables par clause et éditables à la volée :
+
+| Mode | Rendu dans Word | Configuration |
+|---|---|---|
+| **Gras** | Texte en gras, style hérité du document | `subtitle_type: "bold"` |
+| **Style Word** | Style nommé Word (ex. Heading 3) | `subtitle_type: "style"` + `subtitle_style: "Heading 3"` |
+| **À puce** | Caractère de puce + indentation gauche | `subtitle_type: "puce"` + `subtitle_bullet` + `subtitle_indent` |
+
+L'indentation des puces est exprimée en twips (1/1440 de pouce) :
+niveau 1 = 720 twips (0,5"), niveau 2 = 1440 twips (1"), niveau 3 = 2160 twips (1,5").
 
 ### Insertion dans le .docx
 

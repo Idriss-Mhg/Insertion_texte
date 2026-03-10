@@ -1,18 +1,38 @@
 {
   "LMT_OPCVM": {
     "subtitle": "Outils de gestion de la liquidité (LMT)",
-    "text": "La société de gestion peut, dans des circonstances exceptionnelles et dans l'intérêt des porteurs, recourir à des outils de gestion de la liquidité tels que la suspension des rachats, le plafonnement des rachats (gates) ou le swing pricing, conformément à la réglementation en vigueur."
+    "subtitle_type": "style",
+    "subtitle_style": "Heading 3",
+    "subtitle_bullet": "•",
+    "subtitle_indent": 1,
+    "text": "La société de gestion peut, dans des circonstances exceptionnelles et dans l'intérêt des porteurs, recourir à des outils de gestion de la liquidité tels que la suspension des rachats, le plafonnement des rachats (gates) ou le swing pricing, conformément à la réglementation en vigueur.",
+    "text_style": "Normal"
   },
   "LMT_FIA": {
     "subtitle": "Gestion du risque de liquidité",
-    "text": "Conformément à l'article L. 214-24-41 du Code monétaire et financier, la société de gestion met en œuvre une politique de gestion du risque de liquidité et veille à ce que le profil de liquidité des investissements du FIA soit conforme à ses obligations sous-jacentes. Des outils de gestion de la liquidité peuvent être activés en cas de stress de liquidité, dans l'intérêt des investisseurs."
+    "subtitle_type": "style",
+    "subtitle_style": "Heading 3",
+    "subtitle_bullet": "•",
+    "subtitle_indent": 1,
+    "text": "Conformément à l'article L. 214-24-41 du Code monétaire et financier, la société de gestion met en œuvre une politique de gestion du risque de liquidité et veille à ce que le profil de liquidité des investissements du FIA soit conforme à ses obligations sous-jacentes. Des outils de gestion de la liquidité peuvent être activés en cas de stress de liquidité, dans l'intérêt des investisseurs.",
+    "text_style": "Normal"
   },
   "LMT_FCPR": {
     "subtitle": "",
-    "text": "Le fonds peut, dans des conditions de marché exceptionnelles, suspendre temporairement les rachats dans la limite prévue par la réglementation et les dispositions du présent prospectus, après information de l'AMF."
+    "subtitle_type": "bold",
+    "subtitle_style": "Heading 3",
+    "subtitle_bullet": "•",
+    "subtitle_indent": 1,
+    "text": "Le fonds peut, dans des conditions de marché exceptionnelles, suspendre temporairement les rachats dans la limite prévue par la réglementation et les dispositions du présent prospectus, après information de l'AMF.",
+    "text_style": "Normal"
   },
   "ESG_OPCVM": {
     "subtitle": "",
-    "text": "LOREM IPSUM"
+    "subtitle_type": "bold",
+    "subtitle_style": "Heading 3",
+    "subtitle_bullet": "•",
+    "subtitle_indent": 1,
+    "text": "LOREM IPSUM",
+    "text_style": "Normal"
   }
 }
