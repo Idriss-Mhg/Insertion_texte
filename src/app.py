@@ -222,6 +222,10 @@ class App(tk.Tk):
         ttk.Radiobutton(row_fmt, text="Gras", variable=self._subtitle_type_var,
                         value="bold", command=self._on_subtitle_type_change).pack(side=tk.LEFT, padx=(6, 2))
 
+        # Radio "Souligné"
+        ttk.Radiobutton(row_fmt, text="Souligné", variable=self._subtitle_type_var,
+                        value="underline", command=self._on_subtitle_type_change).pack(side=tk.LEFT, padx=(8, 2))
+
         # Radio + combobox "Style Word"
         ttk.Radiobutton(row_fmt, text="Style Word", variable=self._subtitle_type_var,
                         value="style", command=self._on_subtitle_type_change).pack(side=tk.LEFT, padx=(8, 2))
@@ -395,6 +399,10 @@ class App(tk.Tk):
 
         ttk.Radiobutton(f_fmt, text="Gras", variable=self._edit_subtitle_type_var,
                         value="bold", command=self._on_edit_subtitle_type_change).pack(side=tk.LEFT, padx=(6, 2))
+
+        # Radio "Souligné"
+        ttk.Radiobutton(f_fmt, text="Souligné", variable=self._edit_subtitle_type_var,
+                        value="underline", command=self._on_edit_subtitle_type_change).pack(side=tk.LEFT, padx=(8, 2))
 
         ttk.Radiobutton(f_fmt, text="Style Word", variable=self._edit_subtitle_type_var,
                         value="style", command=self._on_edit_subtitle_type_change).pack(side=tk.LEFT, padx=(8, 2))
@@ -863,9 +871,16 @@ class App(tk.Tk):
             )
             self._html_frame.load_html(html)
             if highlight_idx is not None:
-                fraction = self._scroll_fraction(highlight_idx)
-                # Délai nécessaire : load_html() est asynchrone côté rendu tkhtml3
-                self.after(120, lambda f=fraction: self._html_frame.yview_moveto(f))
+                # Recule légèrement pour afficher quelques paragraphes de contexte
+                # au-dessus de la cible (fraction - 0.03).
+                fraction = max(0.0, self._scroll_fraction(highlight_idx) - 0.03)
+                # Premier scroll à 200 ms — tkhtml3 est asynchrone, on lui laisse
+                # le temps de rendre le HTML avant de scroller.
+                self.after(200, lambda f=fraction: self._html_frame.yview_moveto(f))
+                # Second scroll à 500 ms — filet de sécurité pour les gros fichiers
+                # dont le rendu prend plus de temps (documents avec beaucoup de
+                # paragraphes dans des tableaux ou des contrôles de contenu).
+                self.after(500, lambda f=fraction: self._html_frame.yview_moveto(f))
         except Exception:
             self._html_frame.load_html(
                 "<body style='color:gray;padding:16px'>Aperçu indisponible pour ce fichier.</body>"

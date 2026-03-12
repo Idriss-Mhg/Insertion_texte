@@ -150,11 +150,16 @@ def backup_and_open(filepath: str, backup_dir: Path) -> Document:
 
     La sauvegarde est nommée <nom_du_fichier>_old.docx et placée dans backup_dir.
     Si backup_dir n'existe pas, il est créé automatiquement.
+
+    La copie n'est créée qu'une seule fois (si elle n'existe pas encore), afin de
+    toujours conserver l'original vierge — même si le fichier est rechargé plusieurs
+    fois (navigation Précédent/Suivant ou plusieurs sessions sur le même dossier).
     """
     path = Path(filepath)
     backup_dir.mkdir(parents=True, exist_ok=True)
     backup = backup_dir / (path.stem + "_old" + path.suffix)
-    shutil.copy2(path, backup)
+    if not backup.exists():
+        shutil.copy2(path, backup)
     return Document(filepath)
 
 
@@ -253,6 +258,7 @@ def _make_tracked_paragraph(
     date_str: str,
     rev_id: int,
     bold: bool = False,
+    underline: bool = False,
     style_name: str | None = None,
     indent_twips: int = 0,
 ) -> tuple[OxmlElement, int]:
@@ -270,7 +276,10 @@ def _make_tracked_paragraph(
           </w:pPr>
           <w:ins w:id="N+1" w:author="..." w:date="...">
             <w:r>
-              [<w:rPr><w:b/></w:rPr>]      ← si bold=True
+              [<w:rPr>
+                [<w:b/>]                   ← si bold=True
+                [<w:u w:val="single"/>]    ← si underline=True
+              </w:rPr>]
               <w:t>texte</w:t>
             </w:r>
           </w:ins>
@@ -282,6 +291,7 @@ def _make_tracked_paragraph(
         date_str: Date ISO 8601 UTC (ex. "2026-03-10T14:32:00Z").
         rev_id: Premier ID de révision disponible (deux IDs consommés).
         bold: Applique le gras au run (sous-titres en mode "Gras").
+        underline: Applique le soulignement simple au run (sous-titres en mode "Souligné").
         style_name: Nom du style Word à appliquer (ex. "Heading 3", "Normal").
                     None = pas de style explicite (hérite du document).
         indent_twips: Indentation gauche en twips pour les puces (0 = aucune).
@@ -323,9 +333,16 @@ def _make_tracked_paragraph(
     ins_run.set(qn("w:date"),   date_str)
 
     new_r = OxmlElement("w:r")
-    if bold:
+    if bold or underline:
+        # On regroupe toutes les propriétés de caractère dans un seul <w:rPr>
         rPr = OxmlElement("w:rPr")
-        rPr.append(OxmlElement("w:b"))
+        if bold:
+            rPr.append(OxmlElement("w:b"))
+        if underline:
+            # w:u w:val="single" = soulignement simple (le plus courant dans Word)
+            u = OxmlElement("w:u")
+            u.set(qn("w:val"), "single")
+            rPr.append(u)
         new_r.append(rPr)
 
     new_t = OxmlElement("w:t")
@@ -360,6 +377,7 @@ def insert_clause_after(
 
     Format du sous-titre contrôlé par subtitle_config :
         {"type": "bold"}                              → texte gras (défaut)
+        {"type": "underline"}                         → texte souligné
         {"type": "style", "style": "Heading 3"}       → style Word nommé
         {"type": "puce",  "bullet": "•", "indent": 1} → puce avec indentation
 
@@ -392,7 +410,7 @@ def insert_clause_after(
         if sub_type == "style":
             items.append({
                 "text": subtitle.strip(),
-                "bold": False,
+                "bold": False, "underline": False,
                 "style_name": cfg.get("style", "Heading 3"),
                 "indent_twips": 0,
             })
@@ -401,21 +419,28 @@ def insert_clause_after(
             level = int(cfg.get("indent", 1))
             items.append({
                 "text": f"{bullet}\t{subtitle.strip()}",
-                "bold": False,
+                "bold": False, "underline": False,
                 "style_name": None,
                 "indent_twips": INDENT_LEVELS.get(level, 720),
+            })
+        elif sub_type == "underline":
+            items.append({
+                "text": subtitle.strip(),
+                "bold": False, "underline": True,
+                "style_name": None,
+                "indent_twips": 0,
             })
         else:  # "bold" (défaut)
             items.append({
                 "text": subtitle.strip(),
-                "bold": True,
+                "bold": True, "underline": False,
                 "style_name": None,
                 "indent_twips": 0,
             })
 
     items.append({
         "text": text.strip(),
-        "bold": False,
+        "bold": False, "underline": False,
         "style_name": text_style or None,
         "indent_twips": 0,
     })
@@ -427,6 +452,7 @@ def insert_clause_after(
         new_p, rev_id = _make_tracked_paragraph(
             item["text"], author, date_str, rev_id,
             bold=item["bold"],
+            underline=item["underline"],
             style_name=item["style_name"],
             indent_twips=item["indent_twips"],
         )
