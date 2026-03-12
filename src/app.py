@@ -32,16 +32,15 @@ from tkinter import filedialog, messagebox, ttk
 from tkinterweb import HtmlFrame
 
 from src import docx_handler, logger
+from src.paths import CLAUSES_PATH
 
 # -----------------------------------------------------------------------------
 # Constantes
 # -----------------------------------------------------------------------------
 
-# Chemin vers le fichier de configuration des clauses (à la racine du projet)
-CLAUSES_PATH = Path(__file__).parent.parent / "clauses.json"
-
-# Nom du sous-dossier créé dans le dossier de travail pour les sauvegardes _old
-BACKUP_FOLDER_NAME = "_sauvegardes"
+# Noms des sous-dossiers de sortie créés dans le dossier de travail
+TC_FOLDER_NAME    = "_track_changes"   # insertions avec Track Changes (w:ins)
+PLAIN_FOLDER_NAME = "_texte_brut"      # insertions en texte direct, sans révision
 
 # CSS injecté dans la prévisualisation HTML du document.
 # tkinterweb utilise un moteur HTML basique (tkhtml3) : on reste sur du CSS simple.
@@ -53,6 +52,9 @@ h1, h2, h3, h4 { font-family: Arial, sans-serif; color: #1a1a4e;
 p     { margin: 0.5em 0; text-align: justify; }
 .highlight { background: #fff3cd; border-left: 3px solid #f0ad4e;
              padding-left: 6px; }
+.ellipsis { color: #aaa; font-style: italic; text-align: center;
+            border-top: 1px dashed #ccc; border-bottom: 1px dashed #ccc;
+            padding: 3px 0; margin: 6px 0; }
 """
 
 
@@ -107,8 +109,9 @@ class App(tk.Tk):
         # Dossier de travail sélectionné par l'utilisateur
         self._folder: Path | None = None
 
-        # Sous-dossier de sauvegardes (_sauvegardes/) créé dans _folder
-        self._backup_dir: Path | None = None
+        # Dossiers de sortie créés dans _folder lors de la première insertion
+        self._tc_dir: Path | None = None     # versions Track Changes
+        self._plain_dir: Path | None = None  # versions texte brut
 
         # File d'attente : liste ordonnée des .docx à traiter dans _folder
         self._queue: list[Path] = []
@@ -337,13 +340,23 @@ class App(tk.Tk):
         sb_para.config(command=self._listbox.yview)
         sb_para.pack(side=tk.RIGHT, fill=tk.Y)
         self._listbox.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-        # À chaque sélection, on met en évidence le paragraphe dans la preview
-        self._listbox.bind("<<ListboxSelect>>", self._on_para_select)
+        # <<ListboxSelect>> = changement de sélection ; <ButtonRelease-1> = re-clic
+        # sur le même item (repasse en vue fenêtrée après "Vue complète")
+        self._listbox.bind("<<ListboxSelect>>",  self._on_para_select)
+        self._listbox.bind("<ButtonRelease-1>",  self._on_para_select)
 
         # Pane droite — prévisualisation HTML du document
         # tkinterweb/HtmlFrame utilise le moteur tkhtml3 (pas de JavaScript).
         f_preview = ttk.LabelFrame(paned, text="Aperçu du document")
         paned.add(f_preview, weight=2)
+
+        # Barre d'outils du panneau preview (bouton vue complète)
+        f_prev_bar = ttk.Frame(f_preview)
+        f_prev_bar.pack(fill=tk.X, padx=2, pady=(2, 0))
+        ttk.Button(
+            f_prev_bar, text="Vue complète", width=14,
+            command=lambda: self._refresh_preview()
+        ).pack(side=tk.LEFT, padx=2)
 
         self._html_frame = HtmlFrame(f_preview, messages_enabled=False)
         self._html_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
@@ -663,7 +676,8 @@ class App(tk.Tk):
         if not folder:
             return
         self._folder = Path(folder)
-        self._backup_dir = self._folder / BACKUP_FOLDER_NAME
+        self._tc_dir    = self._folder / TC_FOLDER_NAME
+        self._plain_dir = self._folder / PLAIN_FOLDER_NAME
         self._queue = sorted(self._folder.glob("*.docx"))
 
         if not self._queue:
@@ -679,19 +693,19 @@ class App(tk.Tk):
 
     def _load_current_file(self):
         """
-        Charge le fichier courant (self._queue[self._queue_idx]) :
-          1. Crée une sauvegarde _old.docx dans _sauvegardes/
-          2. Ouvre le document avec python-docx
-          3. Construit self._flat_paras via collect_paragraphs() — traversée
+        Charge le fichier courant (self._queue[self._queue_idx]) en lecture
+        seule, sans modifier l'original :
+          1. Ouvre le document avec python-docx (original intact)
+          2. Construit self._flat_paras via collect_paragraphs() — traversée
              XML complète qui capture les paragraphes dans les tableaux (w:td)
              et les contrôles de contenu (w:sdt), en plus des paragraphes
              de premier niveau. C'est la liste de référence utilisée partout.
-          4. Met à jour les widgets de navigation et de statut
-          5. Vide la listbox et rafraîchit la prévisualisation
+          3. Met à jour les widgets de navigation et de statut
+          4. Vide la listbox et rafraîchit la prévisualisation
         """
         path = self._queue[self._queue_idx]
         try:
-            self._doc = docx_handler.backup_and_open(str(path), self._backup_dir)
+            self._doc = docx_handler.open_document(str(path))
         except Exception as e:
             messagebox.showerror("Erreur", str(e))
             return
@@ -706,7 +720,7 @@ class App(tk.Tk):
         self._flat_paras = docx_handler.collect_paragraphs(self._doc)
         self._listbox.delete(0, tk.END)
         self._para_indices = []
-        self._status(f"Fichier chargé — {len(self._flat_paras)} paragraphes. Sauvegarde dans {BACKUP_FOLDER_NAME}/")
+        self._status(f"Fichier chargé — {len(self._flat_paras)} paragraphes.")
         self._refresh_preview()
 
     def _next_file(self):
@@ -800,9 +814,9 @@ class App(tk.Tk):
 
     def _on_para_select(self, *_):
         """
-        Déclenché à chaque clic dans la listbox.
-        Régénère la prévisualisation HTML avec le paragraphe sélectionné mis en
-        évidence, puis scrolle jusqu'à lui via yview_moveto.
+        Déclenché à chaque clic dans la listbox (y compris re-clic sur le même item).
+        Régénère la prévisualisation en vue fenêtrée centrée sur le paragraphe sélectionné.
+        La cible est toujours en haut du fragment HTML — aucun scroll nécessaire.
         """
         sel = self._listbox.curselection()
         if not sel:
@@ -836,59 +850,21 @@ class App(tk.Tk):
     # Logique de l'onglet Insertion — Prévisualisation
     # =========================================================================
 
-    def _scroll_fraction(self, highlight_idx: int) -> float:
-        """
-        Calcule la fraction de scroll (0.0 à 1.0) correspondant à la position
-        visuelle du paragraphe highlight_idx dans la prévisualisation.
-
-        On pondère chaque paragraphe par sa hauteur estimée plutôt que de
-        diviser naïvement par le nombre total de paragraphes. Cela compense
-        le fait que les paragraphes ont des longueurs très variables : un long
-        paragraphe occupe beaucoup plus d'espace visuel qu'un titre court.
-
-        Heuristique :
-          - Poids de base = max(1, len(texte) / 80)  [~80 caractères par ligne]
-          - Bonus heading  = +2.0 lignes             [marge CSS margin-top: 1.2em]
-
-        Utilise self._flat_paras pour être cohérent avec la listbox et la
-        prévisualisation (les paragraphes dans les tableaux/SDT sont inclus).
-
-        Args:
-            highlight_idx: Index du paragraphe cible dans self._flat_paras.
-
-        Returns:
-            Fraction entre 0.0 et 0.99 à passer à yview_moveto().
-        """
-        weights: list[tuple[int, float]] = []
-
-        for i, p_elem in enumerate(self._flat_paras):
-            text = docx_handler._para_text(p_elem).strip()
-            if not text:
-                continue
-            is_heading = docx_handler._para_html_tag(p_elem) != "p"
-            lines = max(1.0, len(text) / 80)
-            weight = lines + (2.0 if is_heading else 0.0)
-            weights.append((i, weight))
-
-        total = sum(w for _, w in weights)
-        if total == 0:
-            return 0.0
-        cumulative = sum(w for i, w in weights if i < highlight_idx)
-        return max(0.0, min(0.99, cumulative / total))
-
     def _refresh_preview(self, highlight_idx: int | None = None):
         """
-        Génère le HTML du document courant via docx_handler.build_html() et
-        l'injecte dans le widget HtmlFrame.
+        Génère le HTML du document courant et l'injecte dans le widget HtmlFrame.
 
-        Si highlight_idx est fourni, le paragraphe correspondant reçoit la
-        classe CSS "highlight". Après le chargement (délai de 120 ms pour
-        laisser le temps au moteur HTML de rendre la page), on appelle
-        yview_moveto() avec la fraction calculée par _scroll_fraction().
+        Deux modes :
+          - highlight_idx fourni : affiche une fenêtre de paragraphes centrée
+            sur la cible (build_html_window). La cible est toujours en haut de
+            la zone visible — aucun scroll nécessaire.
+          - highlight_idx absent : affiche le document complet (build_html),
+            utilisé au chargement initial du fichier.
 
-        Note : tkinterweb ne supporte pas JavaScript par défaut (moteur tkhtml3),
-        donc on ne peut pas utiliser scrollIntoView(). On utilise à la place
-        yview_moveto() qui est une méthode native du widget Tk.
+        Note : tkinterweb/tkhtml3 ne supporte pas JavaScript, ce qui rend le
+        scroll programmatique peu fiable (yview_moveto est basé sur une
+        fraction du document total, impossible à calculer avec précision sans
+        connaître les hauteurs rendues). La vue fenêtrée élimine ce problème.
 
         Args:
             highlight_idx: Index du paragraphe à mettre en évidence, ou None.
@@ -896,7 +872,14 @@ class App(tk.Tk):
         if not self._doc:
             return
         try:
-            html_body = docx_handler.build_html(self._doc, highlight_idx=highlight_idx, flat_paras=self._flat_paras)
+            if highlight_idx is not None:
+                # Vue fenêtrée : 4 paragraphes de contexte avant, 25 après.
+                # La cible est en haut du fragment → toujours visible, sans scroll.
+                html_body = docx_handler.build_html_window(
+                    self._doc, highlight_idx, flat_paras=self._flat_paras
+                )
+            else:
+                html_body = docx_handler.build_html(self._doc, flat_paras=self._flat_paras)
             html = (
                 f"<!DOCTYPE html><html><head>"
                 f'<meta charset="utf-8">'
@@ -904,17 +887,6 @@ class App(tk.Tk):
                 f"</head><body>{html_body}</body></html>"
             )
             self._html_frame.load_html(html)
-            if highlight_idx is not None:
-                # Recule légèrement pour afficher quelques paragraphes de contexte
-                # au-dessus de la cible (fraction - 0.03).
-                fraction = max(0.0, self._scroll_fraction(highlight_idx) - 0.03)
-                # Premier scroll à 200 ms — tkhtml3 est asynchrone, on lui laisse
-                # le temps de rendre le HTML avant de scroller.
-                self.after(200, lambda f=fraction: self._html_frame.yview_moveto(f))
-                # Second scroll à 500 ms — filet de sécurité pour les gros fichiers
-                # dont le rendu prend plus de temps (documents avec beaucoup de
-                # paragraphes dans des tableaux ou des contrôles de contenu).
-                self.after(500, lambda f=fraction: self._html_frame.yview_moveto(f))
         except Exception:
             self._html_frame.load_html(
                 "<body style='color:gray;padding:16px'>Aperçu indisponible pour ce fichier.</body>"
@@ -926,14 +898,23 @@ class App(tk.Tk):
 
     def _insert(self):
         """
-        Insère la clause dans le document courant après le paragraphe sélectionné.
+        Insère la clause dans deux fichiers de sortie distincts, sans toucher
+        l'original.
 
         Étapes :
           1. Validation : document ouvert, paragraphe sélectionné, clause non vide
-          2. Insertion via docx_handler.insert_clause_after()
-          3. Sauvegarde du document (écrase le .docx original)
+          2. Pour la version Track Changes :
+               - Ouvre une copie fraîche de l'original
+               - Insère avec <w:ins> via insert_clause_after()
+               - Écrit dans _track_changes/<fichier>.docx
+          3. Pour la version texte brut :
+               - Ouvre une nouvelle copie fraîche de l'original
+               - Insère en paragraphes directs via insert_clause_plain_after()
+               - Écrit dans _texte_brut/<fichier>.docx
           4. Journalisation dans logs/insertions.csv
           5. Rafraîchissement du log et passage au fichier suivant
+
+        L'original n'est jamais modifié.
         """
         if not self._doc:
             messagebox.showwarning("Attention", "Ouvrez d'abord un dossier.")
@@ -963,16 +944,35 @@ class App(tk.Tk):
         text_font_size = self._text_font_size_var.get()
 
         filepath = str(self._queue[self._queue_idx])
+        filename = self._queue[self._queue_idx].name
+        self._tc_dir.mkdir(parents=True, exist_ok=True)
+        self._plain_dir.mkdir(parents=True, exist_ok=True)
+
         try:
+            # ── Version Track Changes ─────────────────────────────────────────
+            doc_tc = docx_handler.open_document(filepath)
+            flat_tc = docx_handler.collect_paragraphs(doc_tc)
             docx_handler.insert_clause_after(
-                self._doc, para_idx, subtitle, clause_text, author,
+                doc_tc, para_idx, subtitle, clause_text, author,
                 subtitle_config=subtitle_config, text_style=text_style,
                 subtitle_font_size=subtitle_font_size, text_font_size=text_font_size,
-                flat_paras=self._flat_paras,
+                flat_paras=flat_tc,
             )
-            docx_handler.save_document(self._doc, filepath)
+            docx_handler.save_document(doc_tc, str(self._tc_dir / filename))
+
+            # ── Version texte brut ────────────────────────────────────────────
+            doc_plain = docx_handler.open_document(filepath)
+            flat_plain = docx_handler.collect_paragraphs(doc_plain)
+            docx_handler.insert_clause_plain_after(
+                doc_plain, para_idx, subtitle, clause_text,
+                subtitle_config=subtitle_config, text_style=text_style,
+                subtitle_font_size=subtitle_font_size, text_font_size=text_font_size,
+                flat_paras=flat_plain,
+            )
+            docx_handler.save_document(doc_plain, str(self._plain_dir / filename))
+
             logger.log_insertion(filepath, self._fund_var.get(), para_idx, subtitle, clause_text)
-            self._status(f"Clause insérée après §{para_idx}. Passage au fichier suivant…")
+            self._status(f"Clause insérée après §{para_idx} → {TC_FOLDER_NAME}/ et {PLAIN_FOLDER_NAME}/")
             self._refresh_log()
             self._next_file()
         except Exception as e:

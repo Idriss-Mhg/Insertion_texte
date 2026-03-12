@@ -13,9 +13,7 @@ import csv
 from datetime import datetime
 from pathlib import Path
 
-# Emplacement du fichier de log : <racine_projet>/logs/insertions.csv
-LOG_DIR = Path(__file__).parent.parent / "logs"
-LOG_FILE = LOG_DIR / "insertions.csv"
+from src.paths import LOG_DIR, LOG_FILE
 
 _HEADERS = ["date", "heure", "fichier", "code_insertion", "paragraphe_index", "sous_titre", "extrait_clause"]
 

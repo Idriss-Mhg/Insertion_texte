@@ -2,10 +2,15 @@
 # src/docx_handler.py — Manipulation des fichiers .docx
 #
 # Ce module gère toutes les opérations sur les documents Word :
-#   - Sauvegarde de sécurité avant modification
+#   - Ouverture en lecture seule (l'original n'est jamais modifié)
 #   - Lecture et recherche de paragraphes (y compris dans tableaux et SDT)
-#   - Génération du HTML de prévisualisation
-#   - Insertion de nouvelles clauses en mode révision (Track Changes / <w:ins>)
+#   - Génération du HTML de prévisualisation (document complet ou fenêtre)
+#   - Insertion de clauses en mode révision (Track Changes / <w:ins>)
+#   - Insertion de clauses en texte brut (sans balisage de révision)
+#
+# Deux fichiers de sortie sont produits par insertion :
+#   - _track_changes/<fichier>.docx  : version avec <w:ins> (révision Word)
+#   - _texte_brut/<fichier>.docx     : version texte direct, sans révision
 #
 # Deux types de documents sont supportés :
 #   1. Documents "classiques" : paragraphes directement dans <w:body>
@@ -19,7 +24,6 @@
 
 import html as _html
 import re
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -139,27 +143,89 @@ def build_html(
     return "\n".join(parts)
 
 
+def build_html_window(
+    doc: Document,
+    highlight_idx: int,
+    before: int = 4,
+    after: int = 25,
+    flat_paras: list | None = None,
+) -> str:
+    """
+    Génère un fragment HTML centré sur le paragraphe highlight_idx.
+
+    Affiche jusqu'à `before` paragraphes non vides avant la cible et
+    `after` paragraphes après. Un marqueur « — … — » est ajouté si du
+    contenu est tronqué au début ou à la fin.
+
+    La cible reçoit class="highlight". Comme la cible est toujours proche
+    du haut du fragment, aucun scroll n'est nécessaire côté UI.
+
+    Args:
+        doc: Document python-docx (utilisé si flat_paras est None).
+        highlight_idx: Index de la cible dans flat_paras.
+        before: Nombre max de paragraphes non vides avant la cible.
+        after: Nombre max de paragraphes non vides après la cible.
+        flat_paras: Liste plate produite par collect_paragraphs().
+
+    Returns:
+        Fragment HTML (sans <html>/<head>).
+    """
+    paras = flat_paras if flat_paras is not None else [p._p for p in doc.paragraphs]
+    parts = []
+
+    # ── Paragraphes avant la cible ────────────────────────────────────────────
+    before_items: list[tuple[int, object]] = []
+    for i in range(highlight_idx - 1, -1, -1):
+        if _para_text(paras[i]).strip():
+            before_items.append((i, paras[i]))
+            if len(before_items) >= before:
+                break
+    before_items.reverse()
+
+    # Marqueur si le document contient du contenu avant la fenêtre
+    n_before_total = sum(1 for i in range(highlight_idx) if _para_text(paras[i]).strip())
+    if n_before_total > len(before_items):
+        parts.append('<p class="ellipsis">— … —</p>')
+
+    for i, p_elem in before_items:
+        tag = _para_html_tag(p_elem)
+        escaped = _html.escape(_para_text(p_elem))
+        parts.append(f'<{tag} id="para-{i}">{escaped}</{tag}>')
+
+    # ── Paragraphe cible (toujours visible, en haut de la zone) ──────────────
+    tag = _para_html_tag(paras[highlight_idx])
+    escaped = _html.escape(_para_text(paras[highlight_idx]))
+    parts.append(f'<{tag} id="para-{highlight_idx}" class="highlight">{escaped}</{tag}>')
+
+    # ── Paragraphes après la cible ────────────────────────────────────────────
+    after_count = 0
+    for i in range(highlight_idx + 1, len(paras)):
+        if not _para_text(paras[i]).strip():
+            continue
+        tag = _para_html_tag(paras[i])
+        escaped = _html.escape(_para_text(paras[i]))
+        parts.append(f'<{tag} id="para-{i}">{escaped}</{tag}>')
+        after_count += 1
+        if after_count >= after:
+            # Marqueur si contenu restant après la fenêtre
+            if any(_para_text(paras[j]).strip() for j in range(i + 1, len(paras))):
+                parts.append('<p class="ellipsis">— … —</p>')
+            break
+
+    return "\n".join(parts)
+
+
 # =============================================================================
 # Gestion des fichiers
 # =============================================================================
 
-def backup_and_open(filepath: str, backup_dir: Path) -> Document:
+def open_document(filepath: str) -> Document:
     """
-    Crée une copie de sécurité du fichier avant toute modification, puis ouvre
-    le document original.
+    Ouvre un document .docx en lecture/affichage sans le modifier.
 
-    La sauvegarde est nommée <nom_du_fichier>_old.docx et placée dans backup_dir.
-    Si backup_dir n'existe pas, il est créé automatiquement.
-
-    La copie n'est créée qu'une seule fois (si elle n'existe pas encore), afin de
-    toujours conserver l'original vierge — même si le fichier est rechargé plusieurs
-    fois (navigation Précédent/Suivant ou plusieurs sessions sur le même dossier).
+    Le fichier original n'est jamais touché. Les versions modifiées sont
+    écrites dans des dossiers de sortie séparés (_track_changes/ et _texte_brut/).
     """
-    path = Path(filepath)
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup = backup_dir / (path.stem + "_old" + path.suffix)
-    if not backup.exists():
-        shutil.copy2(path, backup)
     return Document(filepath)
 
 
@@ -475,6 +541,189 @@ def insert_clause_after(
     for item in reversed(items):
         new_p, rev_id = _make_tracked_paragraph(
             item["text"], author, date_str, rev_id,
+            bold=item["bold"],
+            underline=item["underline"],
+            font_size=item["font_size"],
+            style_name=item["style_name"],
+            indent_twips=item["indent_twips"],
+        )
+        anchor.addnext(new_p)
+
+
+# =============================================================================
+# Insertion de clause en texte brut (sans Track Changes)
+# =============================================================================
+
+def _make_plain_paragraph(
+    text: str,
+    bold: bool = False,
+    underline: bool = False,
+    font_size: int = 0,
+    style_name: str | None = None,
+    indent_twips: int = 0,
+) -> OxmlElement:
+    """
+    Construit un <w:p> avec le texte inséré directement, sans balisage
+    Track Changes (<w:ins>). Utilisé pour la version "texte brut".
+
+    Structure XML produite :
+        <w:p>
+          <w:pPr>
+            [<w:pStyle w:val="..."/>]       ← si style_name fourni
+            [<w:ind w:left="..."/>]         ← si indent_twips > 0
+          </w:pPr>
+          <w:r>
+            [<w:rPr>
+              [<w:b/>]
+              [<w:u w:val="single"/>]
+              [<w:sz/><w:szCs/>]
+            </w:rPr>]
+            <w:t>texte</w:t>
+          </w:r>
+        </w:p>
+
+    Args:
+        text: Texte du paragraphe.
+        bold: Applique le gras.
+        underline: Applique le soulignement simple.
+        font_size: Taille en points (0 = hérite du style).
+        style_name: Nom du style Word (None = hérite).
+        indent_twips: Indentation gauche en twips (0 = aucune).
+
+    Returns:
+        Élément <w:p> prêt à être inséré via addnext().
+    """
+    new_p = OxmlElement("w:p")
+
+    # ── Propriétés de paragraphe ──────────────────────────────────────────────
+    pPr = OxmlElement("w:pPr")
+    if style_name:
+        pStyle = OxmlElement("w:pStyle")
+        pStyle.set(qn("w:val"), style_name)
+        pPr.append(pStyle)
+    if indent_twips > 0:
+        ind = OxmlElement("w:ind")
+        ind.set(qn("w:left"), str(indent_twips))
+        pPr.append(ind)
+    new_p.append(pPr)
+
+    # ── Run de texte direct (pas de <w:ins>) ──────────────────────────────────
+    new_r = OxmlElement("w:r")
+    if bold or underline or font_size:
+        rPr = OxmlElement("w:rPr")
+        if bold:
+            rPr.append(OxmlElement("w:b"))
+        if underline:
+            u = OxmlElement("w:u")
+            u.set(qn("w:val"), "single")
+            rPr.append(u)
+        if font_size:
+            half_pts = str(font_size * 2)
+            sz = OxmlElement("w:sz")
+            sz.set(qn("w:val"), half_pts)
+            rPr.append(sz)
+            szCs = OxmlElement("w:szCs")
+            szCs.set(qn("w:val"), half_pts)
+            rPr.append(szCs)
+        new_r.append(rPr)
+
+    new_t = OxmlElement("w:t")
+    new_t.text = text
+    if text.startswith(" ") or text.endswith(" "):
+        new_t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    new_r.append(new_t)
+    new_p.append(new_r)
+
+    return new_p
+
+
+def insert_clause_plain_after(
+    doc: Document,
+    para_idx: int,
+    subtitle: str,
+    text: str,
+    subtitle_config: dict | None = None,
+    text_style: str | None = None,
+    subtitle_font_size: int = 0,
+    text_font_size: int = 0,
+    flat_paras: list | None = None,
+) -> None:
+    """
+    Insère une clause en texte brut (sans Track Changes) immédiatement après
+    le paragraphe désigné par para_idx. Le résultat est un document Word
+    classique, sans bulle de révision.
+
+    Même logique de construction que insert_clause_after, mais les paragraphes
+    sont créés avec _make_plain_paragraph au lieu de _make_tracked_paragraph :
+    pas de <w:ins>, pas d'auteur, pas de date de révision.
+
+    Args:
+        doc: Document python-docx ouvert (copie fraîche de l'original).
+        para_idx: Index dans flat_paras (ou doc.paragraphs si flat_paras=None).
+        subtitle: Texte du sous-titre (ignoré si vide).
+        text: Corps de la clause.
+        subtitle_config: Dict décrivant le format du sous-titre.
+        text_style: Style Word du corps de clause (ex. "Normal"). None = défaut.
+        subtitle_font_size: Taille de police du sous-titre en points (0 = auto).
+        text_font_size: Taille de police du corps de clause en points (0 = auto).
+        flat_paras: Liste plate produite par collect_paragraphs(). Recommandé.
+    """
+    if flat_paras is not None:
+        anchor = flat_paras[para_idx]
+    else:
+        anchor = doc.paragraphs[para_idx]._p
+
+    cfg = subtitle_config or {}
+    sub_type = cfg.get("type", "bold")
+    items = []
+
+    if subtitle and subtitle.strip():
+        if sub_type == "style":
+            items.append({
+                "text": subtitle.strip(),
+                "bold": False, "underline": False,
+                "font_size": subtitle_font_size,
+                "style_name": cfg.get("style", "Heading 3"),
+                "indent_twips": 0,
+            })
+        elif sub_type == "puce":
+            bullet = cfg.get("bullet", "•")
+            level = int(cfg.get("indent", 1))
+            items.append({
+                "text": f"{bullet}\t{subtitle.strip()}",
+                "bold": False, "underline": False,
+                "font_size": subtitle_font_size,
+                "style_name": None,
+                "indent_twips": INDENT_LEVELS.get(level, 720),
+            })
+        elif sub_type == "underline":
+            items.append({
+                "text": subtitle.strip(),
+                "bold": False, "underline": True,
+                "font_size": subtitle_font_size,
+                "style_name": None,
+                "indent_twips": 0,
+            })
+        else:  # "bold" (défaut)
+            items.append({
+                "text": subtitle.strip(),
+                "bold": True, "underline": False,
+                "font_size": subtitle_font_size,
+                "style_name": None,
+                "indent_twips": 0,
+            })
+
+    items.append({
+        "text": text.strip(),
+        "bold": False, "underline": False,
+        "font_size": text_font_size,
+        "style_name": text_style or None,
+        "indent_twips": 0,
+    })
+
+    for item in reversed(items):
+        new_p = _make_plain_paragraph(
+            item["text"],
             bold=item["bold"],
             underline=item["underline"],
             font_size=item["font_size"],

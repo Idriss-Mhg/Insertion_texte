@@ -28,17 +28,19 @@ précisément du point d'insertion, fichier par fichier.
 
 - **Sélection de dossier** : charge en une fois tous les `.docx` d'un dossier réseau
 - **Navigation fichier par fichier** : boutons ◀ Précédent / Suivant ▶ avec compteur `x / n`
-- **Sauvegarde automatique** : avant toute modification, une copie `_old.docx` est créée dans `_sauvegardes/`
+- **Fichiers originaux intacts** : aucune modification sur les `.docx` source — deux fichiers de sortie sont créés par insertion dans des sous-dossiers dédiés
 - **Sélection du code d'insertion** : combobox pré-rempli avec les clauses configurées — tous les champs se chargent automatiquement et restent éditables
+- **Taille de police** : spinbox 0–72 pt pour le sous-titre et pour le texte (0 = hérite du style du document)
 - **Recherche de section** : saisir un mot-clé pour localiser la section cible ; les paragraphes correspondants sont surlignés en jaune dans la listbox
 - **Affichage tout** : affiche l'intégralité des paragraphes du document sans filtre
 - **Point d'insertion** : cliquer sur un paragraphe dans la listbox = insérer la clause **après** ce paragraphe
-- **Prévisualisation HTML** : rendu du document en temps réel à droite ; le paragraphe sélectionné est mis en évidence (fond jaune, barre orange) avec scroll automatique
-- **Compatibilité documents structurés** : les paragraphes dans des tableaux (`w:td`) ou des contrôles de contenu Word (`w:sdt`) sont détectés et affichés — fonctionne même si la quasi-totalité du contenu est dans des structures imbriquées
-- **Mode révision Word (Track Changes)** : toute insertion est balisée `<w:ins>` dans le XML OOXML — elle apparaît en mode révision dans Word, avec le nom de l'auteur et la date
+- **Prévisualisation HTML** : rendu du document en temps réel à droite ; le paragraphe sélectionné est mis en évidence (fond jaune, barre orange) — la vue est centrée sur la cible, toujours visible sans scroll
+- **Vue complète** : bouton dans le panneau preview pour afficher le document entier ; cliquer à nouveau sur un paragraphe de la listbox repasse en vue fenêtrée
+- **Compatibilité documents structurés** : les paragraphes dans des tableaux (`w:td`) ou des contrôles de contenu Word (`w:sdt`) sont détectés et affichés
+- **Mode révision Word (Track Changes)** : la version `_track_changes/` est balisée `<w:ins>` dans le XML OOXML — elle apparaît en mode révision dans Word, avec le nom de l'auteur et la date
 - **Champ Auteur** : le nom saisi est affiché dans la bulle de révision Word (défaut : « Juriste »)
-- **Insertion** : écrase le `.docx` original, journalise l'opération, passe au fichier suivant
-- **Passer sans insérer** : avancer au fichier suivant sans modifier le document courant
+- **Insérer** : produit les deux fichiers de sortie, journalise l'opération, passe au fichier suivant
+- **Passer sans insérer** : avancer au fichier suivant sans modifier ni créer de fichier
 - **Historique** : les 20 dernières insertions sont affichées en bas de l'écran
 
 ### Onglet Clauses
@@ -72,22 +74,28 @@ Insertion_texte/
 ├── src/
 │   ├── __init__.py
 │   ├── app.py               # Interface graphique (Tkinter) — logique UI complète
-│   ├── docx_handler.py      # Manipulation .docx (lecture, insertion Track Changes, HTML)
-│   └── logger.py            # Journalisation CSV des insertions
+│   ├── docx_handler.py      # Manipulation .docx (lecture, insertion, prévisualisation HTML)
+│   ├── logger.py            # Journalisation CSV des insertions
+│   └── paths.py             # Chemins runtime (compatible PyInstaller)
 │
 └── logs/
     └── insertions.csv       # Créé automatiquement au premier lancement
 ```
 
-### Dossier de travail (généré à l'exécution)
+### Dossiers de sortie (générés à l'exécution dans le dossier de travail)
 
 ```
 [dossier_prospectus]/
-├── fonds_A.docx             # Fichiers originaux (modifiés en place)
+├── fonds_A.docx             # Fichiers originaux — jamais modifiés
 ├── fonds_B.docx
-└── _sauvegardes/
-    ├── fonds_A_old.docx     # Copies de sécurité créées avant chaque modification
-    └── fonds_B_old.docx
+│
+├── _track_changes/          # Créé automatiquement lors de la première insertion
+│   ├── fonds_A.docx         # Insertion en mode révision Word (<w:ins>)
+│   └── fonds_B.docx
+│
+└── _texte_brut/             # Créé automatiquement lors de la première insertion
+    ├── fonds_A.docx         # Insertion en texte direct, sans balisage de révision
+    └── fonds_B.docx
 ```
 
 ---
@@ -106,8 +114,10 @@ La convention de nommage recommandée est `CAMPAGNE_TYPEFONDS`
     "subtitle_style": "Heading 3",
     "subtitle_bullet": "•",
     "subtitle_indent": 1,
+    "subtitle_font_size": 0,
     "text": "La société de gestion peut, dans des circonstances...",
-    "text_style": "Normal"
+    "text_style": "Normal",
+    "text_font_size": 11
   }
 }
 ```
@@ -115,12 +125,14 @@ La convention de nommage recommandée est `CAMPAGNE_TYPEFONDS`
 | Champ | Obligatoire | Description |
 |---|---|---|
 | `subtitle` | Non | Texte du sous-titre. Laisser `""` si pas de sous-titre. |
-| `subtitle_type` | Non | Format du sous-titre : `"bold"` (gras), `"style"` (style Word nommé) ou `"puce"` (puce avec indentation). Défaut : `"bold"`. |
+| `subtitle_type` | Non | Format du sous-titre : `"bold"` (gras), `"underline"` (souligné), `"style"` (style Word nommé) ou `"puce"` (puce avec indentation). Défaut : `"bold"`. |
 | `subtitle_style` | Non | Nom du style Word appliqué quand `subtitle_type = "style"` (ex. `"Heading 3"`, `"Titre 2"`). |
 | `subtitle_bullet` | Non | Caractère de puce quand `subtitle_type = "puce"` (ex. `"•"`, `"–"`, `"→"`). |
 | `subtitle_indent` | Non | Niveau d'indentation de la puce (1, 2 ou 3). Correspond respectivement à 0.5, 1 et 1.5 pouce. |
+| `subtitle_font_size` | Non | Taille de police du sous-titre en points (ex. `12`). `0` = hérite du style. |
 | `text` | Oui | Corps de la clause. Texte brut, sans mise en forme. |
 | `text_style` | Non | Style Word du corps de clause (ex. `"Normal"`, `"Corps de texte"`). Défaut : `"Normal"`. |
+| `text_font_size` | Non | Taille de police du corps de clause en points. `0` = hérite du style. |
 
 ---
 
@@ -169,7 +181,6 @@ pip install -r requirements.txt
 |---|---|---|
 | `python-docx` | 1.2.0 | Lecture et écriture des fichiers `.docx` |
 | `tkinterweb` | 4.24.1 | Rendu HTML dans Tkinter (prévisualisation) |
-| `mammoth` | 1.11.0 | Présent dans le venv, non utilisé en production |
 | `pyinstaller` | 6.19.0 | Packaging en exécutable standalone |
 
 ---
@@ -193,11 +204,25 @@ pyinstaller --onefile --windowed main.py
 ```
 
 L'exécutable est généré dans `dist/main`. Copier également `clauses.json` à côté
-de l'exécutable pour que les clauses soient éditables sans repackager.
+de l'exécutable — `src/paths.py` détecte automatiquement si l'application tourne
+en mode frozen (`sys.frozen`) et résout les chemins (`clauses.json`, `logs/`)
+relativement au dossier de l'exécutable plutôt qu'à la racine du projet source.
 
 ---
 
 ## Notes techniques
+
+### Deux fichiers de sortie par insertion
+
+L'original n'est jamais modifié. Chaque insertion produit deux copies indépendantes
+depuis le fichier source :
+
+| Dossier | Contenu | Usage |
+|---|---|---|
+| `_track_changes/` | Insertions balisées `<w:ins>` | Relecture dans Word avec mode révision |
+| `_texte_brut/` | Insertions en paragraphes directs | Version finale acceptée, sans traces de révision |
+
+Les dossiers sont créés automatiquement dans le dossier de travail à la première insertion.
 
 ### Insertion en mode révision Word (Track Changes)
 
@@ -216,7 +241,12 @@ de l'auteur et la date UTC :
   </w:pPr>
   <w:ins w:id="N+1" w:author="Juriste" w:date="2026-03-10T14:32:00Z">
     <w:r>
-      [<w:rPr><w:b/></w:rPr>]         <!-- si sous-titre de type "Gras" -->
+      [<w:rPr>
+        [<w:b/>]                       <!-- si sous-titre de type "Gras" -->
+        [<w:u w:val="single"/>]        <!-- si sous-titre de type "Souligné" -->
+        [<w:sz w:val="24"/>            <!-- ex. 12pt → 24 demi-points -->
+         <w:szCs w:val="24"/>]
+      </w:rPr>]
       <w:t>texte inséré</w:t>
     </w:r>
   </w:ins>
@@ -229,13 +259,17 @@ avec une bulle latérale indiquant l'auteur. Le juriste peut accepter ou refuser
 Les identifiants de révision `w:id` doivent être uniques dans le document. L'outil scanne
 le XML complet pour trouver le maximum existant et incrémente à partir de là.
 
+La taille de police est exprimée en OOXML en **demi-points** : `<w:sz w:val="24"/>` = 12 pt.
+`w:sz` s'applique aux scripts latins, `w:szCs` aux scripts complexes (arabe, hébreu, etc.).
+
 ### Format du sous-titre
 
-Trois modes sont disponibles, configurables par clause et éditables à la volée :
+Quatre modes sont disponibles, configurables par clause et éditables à la volée :
 
 | Mode | Rendu dans Word | Configuration |
 |---|---|---|
 | **Gras** | Texte en gras, style hérité du document | `subtitle_type: "bold"` |
+| **Souligné** | Texte souligné simple, style hérité | `subtitle_type: "underline"` |
 | **Style Word** | Style nommé Word (ex. Heading 3) | `subtitle_type: "style"` + `subtitle_style: "Heading 3"` |
 | **À puce** | Caractère de puce + indentation gauche | `subtitle_type: "puce"` + `subtitle_bullet` + `subtitle_indent` |
 
@@ -270,7 +304,6 @@ La liste résultante (`flat_paras`) est la référence unique utilisée pour :
 - l'affichage dans la listbox
 - la recherche de mot-clé
 - la prévisualisation HTML (avec highlight)
-- le calcul de la fraction de scroll
 - l'ancre d'insertion (`addnext()`)
 
 Les deux types de documents sont ainsi traités de façon identique.
@@ -278,8 +311,26 @@ Les deux types de documents sont ainsi traités de façon identique.
 ### Prévisualisation HTML
 
 `tkinterweb` utilise le moteur `tkhtml3` qui **ne supporte pas JavaScript**.
-La mise en évidence du paragraphe sélectionné est donc réalisée côté serveur :
-on régénère le HTML complet avec la classe CSS `.highlight` sur le paragraphe cible,
-puis on scrolle via `yview_moveto()`. La position de scroll est calculée par une
-heuristique pondérée par la longueur de chaque paragraphe (plus précis qu'un simple
-ratio d'index).
+Le scroll programmatique (`yview_moveto`) est peu fiable car les hauteurs rendues
+sont inconnues. La mise en évidence du paragraphe sélectionné est donc résolue
+par une **vue fenêtrée** : on génère un fragment HTML contenant uniquement
+4 paragraphes avant la cible et 25 après. La cible est ainsi toujours en haut
+du contenu affiché — aucun scroll nécessaire.
+
+Le bouton **Vue complète** régénère le document entier (`build_html`). Cliquer
+à nouveau sur un paragraphe dans la listbox repasse en vue fenêtrée (`build_html_window`).
+
+### Compatibilité PyInstaller
+
+`src/paths.py` expose les chemins utilisés par l'application (`clauses.json`,
+dossier `logs/`) de façon compatible avec un exécutable PyInstaller :
+
+```python
+# sys.frozen = True quand l'app tourne depuis un exe PyInstaller
+if getattr(sys, "frozen", False):
+    RUNTIME_DIR = Path(sys.executable).parent   # dossier du .exe
+else:
+    RUNTIME_DIR = Path(__file__).parent.parent  # racine du projet (dev)
+```
+
+Lors du packaging, `clauses.json` doit être copié manuellement à côté de l'exécutable.
