@@ -259,6 +259,7 @@ def _make_tracked_paragraph(
     rev_id: int,
     bold: bool = False,
     underline: bool = False,
+    font_size: int = 0,
     style_name: str | None = None,
     indent_twips: int = 0,
 ) -> tuple[OxmlElement, int]:
@@ -279,6 +280,8 @@ def _make_tracked_paragraph(
               [<w:rPr>
                 [<w:b/>]                   ← si bold=True
                 [<w:u w:val="single"/>]    ← si underline=True
+                [<w:sz w:val="N*2"/>]      ← si font_size > 0 (OOXML en demi-points)
+                [<w:szCs w:val="N*2"/>]    ← idem pour les scripts complexes
               </w:rPr>]
               <w:t>texte</w:t>
             </w:r>
@@ -292,6 +295,8 @@ def _make_tracked_paragraph(
         rev_id: Premier ID de révision disponible (deux IDs consommés).
         bold: Applique le gras au run (sous-titres en mode "Gras").
         underline: Applique le soulignement simple au run (sous-titres en mode "Souligné").
+        font_size: Taille de police en points (ex. 12). 0 = hérite du style/document.
+                   OOXML utilise des demi-points : 12pt → w:sz val="24".
         style_name: Nom du style Word à appliquer (ex. "Heading 3", "Normal").
                     None = pas de style explicite (hérite du document).
         indent_twips: Indentation gauche en twips pour les puces (0 = aucune).
@@ -333,7 +338,7 @@ def _make_tracked_paragraph(
     ins_run.set(qn("w:date"),   date_str)
 
     new_r = OxmlElement("w:r")
-    if bold or underline:
+    if bold or underline or font_size:
         # On regroupe toutes les propriétés de caractère dans un seul <w:rPr>
         rPr = OxmlElement("w:rPr")
         if bold:
@@ -343,6 +348,16 @@ def _make_tracked_paragraph(
             u = OxmlElement("w:u")
             u.set(qn("w:val"), "single")
             rPr.append(u)
+        if font_size:
+            # OOXML exprime la taille en demi-points : 12pt → val="24"
+            # w:sz = scripts latins ; w:szCs = scripts complexes (arabe, hébreu…)
+            half_pts = str(font_size * 2)
+            sz = OxmlElement("w:sz")
+            sz.set(qn("w:val"), half_pts)
+            rPr.append(sz)
+            szCs = OxmlElement("w:szCs")
+            szCs.set(qn("w:val"), half_pts)
+            rPr.append(szCs)
         new_r.append(rPr)
 
     new_t = OxmlElement("w:t")
@@ -365,6 +380,8 @@ def insert_clause_after(
     author: str,
     subtitle_config: dict | None = None,
     text_style: str | None = None,
+    subtitle_font_size: int = 0,
+    text_font_size: int = 0,
     flat_paras: list | None = None,
 ) -> None:
     """
@@ -389,6 +406,8 @@ def insert_clause_after(
         author: Nom affiché dans la bulle de révision.
         subtitle_config: Dict décrivant le format du sous-titre (voir ci-dessus).
         text_style: Style Word du corps de clause (ex. "Normal"). None = défaut.
+        subtitle_font_size: Taille de police du sous-titre en points (0 = auto).
+        text_font_size: Taille de police du corps de clause en points (0 = auto).
         flat_paras: Liste plate produite par collect_paragraphs(). Recommandé.
     """
     # Élément XML ancre — l'insertion se fait via addnext() juste après lui
@@ -411,6 +430,7 @@ def insert_clause_after(
             items.append({
                 "text": subtitle.strip(),
                 "bold": False, "underline": False,
+                "font_size": subtitle_font_size,
                 "style_name": cfg.get("style", "Heading 3"),
                 "indent_twips": 0,
             })
@@ -420,6 +440,7 @@ def insert_clause_after(
             items.append({
                 "text": f"{bullet}\t{subtitle.strip()}",
                 "bold": False, "underline": False,
+                "font_size": subtitle_font_size,
                 "style_name": None,
                 "indent_twips": INDENT_LEVELS.get(level, 720),
             })
@@ -427,6 +448,7 @@ def insert_clause_after(
             items.append({
                 "text": subtitle.strip(),
                 "bold": False, "underline": True,
+                "font_size": subtitle_font_size,
                 "style_name": None,
                 "indent_twips": 0,
             })
@@ -434,6 +456,7 @@ def insert_clause_after(
             items.append({
                 "text": subtitle.strip(),
                 "bold": True, "underline": False,
+                "font_size": subtitle_font_size,
                 "style_name": None,
                 "indent_twips": 0,
             })
@@ -441,6 +464,7 @@ def insert_clause_after(
     items.append({
         "text": text.strip(),
         "bold": False, "underline": False,
+        "font_size": text_font_size,
         "style_name": text_style or None,
         "indent_twips": 0,
     })
@@ -453,6 +477,7 @@ def insert_clause_after(
             item["text"], author, date_str, rev_id,
             bold=item["bold"],
             underline=item["underline"],
+            font_size=item["font_size"],
             style_name=item["style_name"],
             indent_twips=item["indent_twips"],
         )

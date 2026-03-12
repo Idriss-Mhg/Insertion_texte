@@ -248,6 +248,20 @@ class App(tk.Tk):
         ttk.Spinbox(row_fmt, from_=1, to=3, textvariable=self._subtitle_indent_var,
                     width=3).pack(side=tk.LEFT)
 
+        # ── Tailles de police ─────────────────────────────────────────────────
+        row_sz = ttk.Frame(f_clause)
+        row_sz.pack(fill=tk.X, padx=6, pady=(2, 0))
+        ttk.Label(row_sz, text="Taille s-titre (pt) :").pack(side=tk.LEFT)
+        self._subtitle_font_size_var = tk.IntVar(value=0)
+        ttk.Spinbox(row_sz, from_=0, to=72, textvariable=self._subtitle_font_size_var,
+                    width=4).pack(side=tk.LEFT, padx=(4, 2))
+        ttk.Label(row_sz, text="(0 = auto)").pack(side=tk.LEFT, padx=(0, 16))
+        ttk.Label(row_sz, text="Taille texte (pt) :").pack(side=tk.LEFT)
+        self._text_font_size_var = tk.IntVar(value=0)
+        ttk.Spinbox(row_sz, from_=0, to=72, textvariable=self._text_font_size_var,
+                    width=4).pack(side=tk.LEFT, padx=(4, 2))
+        ttk.Label(row_sz, text="(0 = auto)").pack(side=tk.LEFT)
+
         # ── Style du texte principal ──────────────────────────────────────────
         row_ts = ttk.Frame(f_clause)
         row_ts.pack(fill=tk.X, padx=6, pady=(2, 0))
@@ -379,7 +393,7 @@ class App(tk.Tk):
         f_right = ttk.LabelFrame(parent, text="Édition")
         f_right.grid(row=0, column=1, sticky="nsew", padx=(4, 8), pady=8)
         f_right.columnconfigure(1, weight=1)
-        f_right.rowconfigure(5, weight=1)  # La zone de texte occupe l'espace restant
+        f_right.rowconfigure(6, weight=1)  # La zone de texte occupe l'espace restant
 
         ttk.Label(f_right, text="Code :").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
         self._edit_name_var = tk.StringVar()
@@ -433,16 +447,30 @@ class App(tk.Tk):
                      values=["Normal", "Corps de texte", "Body Text",
                              "Heading 4", "Titre 4"]).pack(side=tk.LEFT, padx=6)
 
-        ttk.Label(f_right, text="Texte de la clause :").grid(row=4, column=0, sticky="nw", padx=8, pady=4)
+        # ── Tailles de police ─────────────────────────────────────────────────
+        f_sz = ttk.Frame(f_right)
+        f_sz.grid(row=4, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 4))
+        ttk.Label(f_sz, text="Taille s-titre (pt) :").pack(side=tk.LEFT)
+        self._edit_subtitle_font_size_var = tk.IntVar(value=0)
+        ttk.Spinbox(f_sz, from_=0, to=72, textvariable=self._edit_subtitle_font_size_var,
+                    width=4).pack(side=tk.LEFT, padx=(4, 2))
+        ttk.Label(f_sz, text="(0 = auto)").pack(side=tk.LEFT, padx=(0, 16))
+        ttk.Label(f_sz, text="Taille texte (pt) :").pack(side=tk.LEFT)
+        self._edit_text_font_size_var = tk.IntVar(value=0)
+        ttk.Spinbox(f_sz, from_=0, to=72, textvariable=self._edit_text_font_size_var,
+                    width=4).pack(side=tk.LEFT, padx=(4, 2))
+        ttk.Label(f_sz, text="(0 = auto)").pack(side=tk.LEFT)
+
+        ttk.Label(f_right, text="Texte de la clause :").grid(row=5, column=0, sticky="nw", padx=8, pady=4)
 
         self._edit_txt = tk.Text(f_right, wrap=tk.WORD, height=10)
         sb_r = ttk.Scrollbar(f_right, orient=tk.VERTICAL, command=self._edit_txt.yview)
         self._edit_txt.config(yscrollcommand=sb_r.set)
-        self._edit_txt.grid(row=5, column=0, columnspan=2, sticky="nsew", padx=8, pady=(0, 4))
-        sb_r.grid(row=5, column=2, sticky="ns", pady=(0, 4))
+        self._edit_txt.grid(row=6, column=0, columnspan=2, sticky="nsew", padx=8, pady=(0, 4))
+        sb_r.grid(row=6, column=2, sticky="ns", pady=(0, 4))
 
         f_form_btns = ttk.Frame(f_right)
-        f_form_btns.grid(row=6, column=0, columnspan=3, sticky="ew", padx=8, pady=(0, 8))
+        f_form_btns.grid(row=7, column=0, columnspan=3, sticky="ew", padx=8, pady=(0, 8))
         ttk.Button(f_form_btns, text="Enregistrer", command=self._clause_save).pack(side=tk.LEFT)
         ttk.Button(f_form_btns, text="Annuler",     command=self._clause_cancel).pack(side=tk.LEFT, padx=8)
         self._lbl_clause_status = ttk.Label(f_form_btns, text="", foreground="gray")
@@ -488,7 +516,9 @@ class App(tk.Tk):
         self._edit_subtitle_style_var.set(data.get("subtitle_style", "Heading 3"))
         self._edit_subtitle_bullet_var.set(data.get("subtitle_bullet", "•"))
         self._edit_subtitle_indent_var.set(data.get("subtitle_indent", 1))
+        self._edit_subtitle_font_size_var.set(data.get("subtitle_font_size", 0))
         self._edit_text_style_var.set(data.get("text_style", "Normal"))
+        self._edit_text_font_size_var.set(data.get("text_font_size", 0))
         self._edit_txt.delete("1.0", tk.END)
         self._edit_txt.insert("1.0", data.get("text", ""))
         self._on_edit_subtitle_type_change()
@@ -547,8 +577,10 @@ class App(tk.Tk):
             "subtitle_style": self._edit_subtitle_style_var.get().strip(),
             "subtitle_bullet": self._edit_subtitle_bullet_var.get(),
             "subtitle_indent": self._edit_subtitle_indent_var.get(),
+            "subtitle_font_size": self._edit_subtitle_font_size_var.get(),
             "text": text,
             "text_style": self._edit_text_style_var.get().strip() or "Normal",
+            "text_font_size": self._edit_text_font_size_var.get(),
         }
         original = self._clause_editing_original_name
 
@@ -709,7 +741,9 @@ class App(tk.Tk):
         self._subtitle_style_var.set(data.get("subtitle_style", "Heading 3"))
         self._subtitle_bullet_var.set(data.get("subtitle_bullet", "•"))
         self._subtitle_indent_var.set(data.get("subtitle_indent", 1))
+        self._subtitle_font_size_var.set(data.get("subtitle_font_size", 0))
         self._text_style_var.set(data.get("text_style", "Normal"))
+        self._text_font_size_var.set(data.get("text_font_size", 0))
         self._txt_clause.delete("1.0", tk.END)
         self._txt_clause.insert("1.0", data.get("text", ""))
         self._on_subtitle_type_change()
@@ -925,12 +959,15 @@ class App(tk.Tk):
             "indent": self._subtitle_indent_var.get(),
         }
         text_style = self._text_style_var.get().strip() or None
+        subtitle_font_size = self._subtitle_font_size_var.get()
+        text_font_size = self._text_font_size_var.get()
 
         filepath = str(self._queue[self._queue_idx])
         try:
             docx_handler.insert_clause_after(
                 self._doc, para_idx, subtitle, clause_text, author,
                 subtitle_config=subtitle_config, text_style=text_style,
+                subtitle_font_size=subtitle_font_size, text_font_size=text_font_size,
                 flat_paras=self._flat_paras,
             )
             docx_handler.save_document(self._doc, filepath)
