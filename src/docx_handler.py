@@ -3,9 +3,18 @@
 #
 # Ce module gère toutes les opérations sur les documents Word :
 #   - Sauvegarde de sécurité avant modification
-#   - Lecture et recherche de paragraphes
+#   - Lecture et recherche de paragraphes (y compris dans tableaux et SDT)
 #   - Génération du HTML de prévisualisation
 #   - Insertion de nouvelles clauses en mode révision (Track Changes / <w:ins>)
+#
+# Deux types de documents sont supportés :
+#   1. Documents "classiques" : paragraphes directement dans <w:body>
+#   2. Documents "structurés" : contenu dans des tableaux (<w:td>) ou des
+#      contrôles de contenu Word (<w:sdt>/<w:sdtContent>)
+#
+# python-docx expose uniquement les paragraphes de premier niveau via
+# doc.paragraphs. Ce module utilise collect_paragraphs() pour traverser le
+# XML complet et capturer tous les paragraphes quelle que soit leur profondeur.
 # =============================================================================
 
 import html as _html
@@ -18,58 +27,121 @@ from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-# Correspondance entre les noms de styles Word (EN et FR) et les balises HTML.
-# Utilisé pour reproduire la hiérarchie des titres dans la prévisualisation.
-_HEADING_TAGS: dict[str, str] = {
-    "heading 1": "h1", "titre 1": "h1",
-    "heading 2": "h2", "titre 2": "h2",
-    "heading 3": "h3", "titre 3": "h3",
-    "heading 4": "h4", "titre 4": "h4",
-}
-
 # Niveaux d'indentation pour les puces, en twips (1 twip = 1/1440 pouce).
-# Niveau 1 = 0.5 pouce, niveau 2 = 1 pouce, niveau 3 = 1.5 pouce.
+# Niveau 1 = 0.5", niveau 2 = 1", niveau 3 = 1.5"
 INDENT_LEVELS: dict[int, int] = {1: 720, 2: 1440, 3: 2160}
 
 
-# -----------------------------------------------------------------------------
-# Prévisualisation
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Helpers bas niveau sur les éléments <w:p> lxml
+#
+# Ces fonctions opèrent directement sur des éléments lxml (pas des objets
+# python-docx), ce qui permet de traiter des paragraphes à n'importe quelle
+# profondeur dans le document XML.
+# =============================================================================
 
-def build_html(doc: Document, highlight_idx: int | None = None) -> str:
+def _para_text(p_elem) -> str:
+    """
+    Extrait le texte brut d'un élément <w:p> lxml en concaténant tous ses <w:t>.
+
+    Inclut le texte des runs normaux et des insertions Track Changes (<w:ins>),
+    mais PAS le texte des suppressions (<w:delText>), ce qui reflète l'état
+    "accepté" du document.
+    """
+    return ''.join(t.text or '' for t in p_elem.iter(qn('w:t')))
+
+
+def _para_html_tag(p_elem) -> str:
+    """
+    Retourne la balise HTML (h1–h4 ou p) correspondant au style du paragraphe.
+
+    Travaille sur l'ID de style Word (attribut w:val de w:pStyle), pas sur
+    le nom complet. Les IDs typiques sont : "Heading1", "Titre2", "1", etc.
+
+    Note : l'ID de style ≠ nom de style. "Heading1" (ID) → "Heading 1" (nom).
+    Cette correspondance est suffisante pour la prévisualisation HTML.
+    """
+    pPr = p_elem.find(qn('w:pPr'))
+    if pPr is not None:
+        pStyle = pPr.find(qn('w:pStyle'))
+        if pStyle is not None:
+            sid = pStyle.get(qn('w:val'), '').lower().replace(' ', '')
+            for lvl in range(1, 5):
+                if any(k in sid for k in (f'heading{lvl}', f'titre{lvl}', f'title{lvl}')):
+                    return f'h{lvl}'
+                # Certains templates utilisent "1", "2", etc. comme ID de style
+                if sid == str(lvl):
+                    return f'h{lvl}'
+    return 'p'
+
+
+# =============================================================================
+# Collecte des paragraphes (traversée complète du XML)
+# =============================================================================
+
+def collect_paragraphs(doc: Document) -> list:
+    """
+    Retourne la liste plate de tous les éléments <w:p> du corps du document,
+    en ordre de lecture, y compris ceux imbriqués dans :
+      - des tableaux          : w:body > w:tbl > w:tr > w:tc > w:p
+      - des content controls  : w:body > w:sdt > w:sdtContent > w:p
+      - des structures mixtes : content controls contenant des tableaux, etc.
+
+    À utiliser à la place de doc.paragraphs, qui ne retourne que les paragraphes
+    enfants directs de w:body (paragraphes de premier niveau).
+
+    Returns:
+        Liste d'éléments lxml <w:p> dans l'ordre du document. Les indices de
+        cette liste sont utilisés comme référence dans toute l'application
+        (listbox, highlight, insertion).
+    """
+    return list(doc.element.body.iter(qn('w:p')))
+
+
+# =============================================================================
+# Prévisualisation HTML
+# =============================================================================
+
+def build_html(
+    doc: Document,
+    highlight_idx: int | None = None,
+    flat_paras: list | None = None,
+) -> str:
     """
     Génère un fragment HTML à partir des paragraphes du document.
 
     Chaque paragraphe non vide reçoit un attribut id="para-{i}" où i est son
-    index dans doc.paragraphs. Cela permet à l'interface de faire le lien entre
+    index dans flat_paras. Cela permet à l'interface de faire le lien entre
     la listbox (qui affiche les index) et la prévisualisation HTML.
 
     Le paragraphe highlight_idx reçoit class="highlight" pour être mis en
     évidence visuellement (fond jaune + barre latérale orange).
 
     Args:
-        doc: Document python-docx ouvert.
+        doc: Document python-docx (utilisé uniquement si flat_paras est None).
         highlight_idx: Index du paragraphe à mettre en évidence, ou None.
+        flat_paras: Liste plate des éléments <w:p> produite par collect_paragraphs().
+                    Si None, se replie sur [p._p for p in doc.paragraphs] (rétrocompat).
 
     Returns:
         Chaîne HTML (fragment <body>, sans les balises <html>/<head>).
     """
+    paras = flat_paras if flat_paras is not None else [p._p for p in doc.paragraphs]
     parts = []
-    for i, para in enumerate(doc.paragraphs):
-        text = para.text
+    for i, p_elem in enumerate(paras):
+        text = _para_text(p_elem)
         if not text.strip():
             continue
-        style = (para.style.name or "").lower() if para.style else ""
-        tag = next((v for k, v in _HEADING_TAGS.items() if k in style), "p")
+        tag = _para_html_tag(p_elem)
         cls = ' class="highlight"' if i == highlight_idx else ""
         escaped = _html.escape(text)
         parts.append(f'<{tag} id="para-{i}"{cls}>{escaped}</{tag}>')
     return "\n".join(parts)
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Gestion des fichiers
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 def backup_and_open(filepath: str, backup_dir: Path) -> Document:
     """
@@ -91,35 +163,78 @@ def save_document(doc: Document, filepath: str) -> None:
     doc.save(filepath)
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Recherche et navigation dans les paragraphes
-# -----------------------------------------------------------------------------
+# =============================================================================
 
-def search_paragraphs(doc: Document, keyword: str) -> list[tuple[int, str]]:
-    """Retourne la liste des (index, texte) des paragraphes contenant le mot-clé."""
+def search_paragraphs(
+    doc: Document,
+    keyword: str,
+    flat_paras: list | None = None,
+) -> list[tuple[int, str]]:
+    """
+    Retourne la liste des (index, texte) des paragraphes contenant le mot-clé.
+
+    Args:
+        doc: Document python-docx (utilisé uniquement si flat_paras est None).
+        keyword: Terme à rechercher (insensible à la casse).
+        flat_paras: Liste plate produite par collect_paragraphs().
+    """
+    paras = flat_paras if flat_paras is not None else [p._p for p in doc.paragraphs]
     keyword_lower = keyword.strip().lower()
-    return [
-        (i, para.text)
-        for i, para in enumerate(doc.paragraphs)
-        if keyword_lower and keyword_lower in para.text.lower()
-    ]
+    results = []
+    for i, p_elem in enumerate(paras):
+        text = _para_text(p_elem)
+        if keyword_lower and keyword_lower in text.lower():
+            results.append((i, text))
+    return results
 
 
-def get_paragraphs_around(doc: Document, center_idx: int, context: int = 4) -> list[tuple[int, str]]:
-    """Retourne les paragraphes situés autour d'un index central (pour le contexte de recherche)."""
+def get_paragraphs_around(
+    doc: Document,
+    center_idx: int,
+    context: int = 4,
+    flat_paras: list | None = None,
+) -> list[tuple[int, str]]:
+    """
+    Retourne les paragraphes situés dans une fenêtre de ±context autour
+    de center_idx (utilisé pour afficher le contexte d'une occurrence de recherche).
+
+    Args:
+        doc: Document python-docx (utilisé uniquement si flat_paras est None).
+        center_idx: Index central (paragraphe trouvé par la recherche).
+        context: Nombre de paragraphes à afficher de chaque côté.
+        flat_paras: Liste plate produite par collect_paragraphs().
+    """
+    paras = flat_paras if flat_paras is not None else [p._p for p in doc.paragraphs]
     start = max(0, center_idx - context)
-    end = min(len(doc.paragraphs), center_idx + context + 1)
-    return [(i, doc.paragraphs[i].text) for i in range(start, end)]
+    end = min(len(paras), center_idx + context + 1)
+    return [(i, _para_text(paras[i])) for i in range(start, end)]
 
 
-def get_all_paragraphs(doc: Document) -> list[tuple[int, str]]:
-    """Retourne tous les paragraphes non vides du document avec leur index."""
-    return [(i, p.text) for i, p in enumerate(doc.paragraphs) if p.text.strip()]
+def get_all_paragraphs(
+    doc: Document,
+    flat_paras: list | None = None,
+) -> list[tuple[int, str]]:
+    """
+    Retourne tous les paragraphes non vides du document avec leur index.
+
+    Args:
+        doc: Document python-docx (utilisé uniquement si flat_paras est None).
+        flat_paras: Liste plate produite par collect_paragraphs().
+    """
+    paras = flat_paras if flat_paras is not None else [p._p for p in doc.paragraphs]
+    result = []
+    for i, p_elem in enumerate(paras):
+        text = _para_text(p_elem)
+        if text.strip():
+            result.append((i, text))
+    return result
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Insertion de clause en mode révision (Track Changes)
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 def _next_revision_id(doc: Document) -> int:
     """
@@ -233,32 +348,44 @@ def insert_clause_after(
     author: str,
     subtitle_config: dict | None = None,
     text_style: str | None = None,
+    flat_paras: list | None = None,
 ) -> None:
     """
     Insère une clause en mode révision Word (Track Changes) immédiatement
     après le paragraphe désigné par para_idx.
 
+    Utilise flat_paras[para_idx] comme élément ancre si flat_paras est fourni,
+    ce qui permet d'insérer après des paragraphes dans des tableaux ou des
+    content controls. Sinon, se replie sur doc.paragraphs[para_idx]._p.
+
     Format du sous-titre contrôlé par subtitle_config :
-        {"type": "bold"}                    → texte gras (défaut)
-        {"type": "style", "style": "Heading 3"}   → style Word nommé
+        {"type": "bold"}                              → texte gras (défaut)
+        {"type": "style", "style": "Heading 3"}       → style Word nommé
         {"type": "puce",  "bullet": "•", "indent": 1} → puce avec indentation
 
     Args:
         doc: Document python-docx ouvert.
-        para_idx: Index du paragraphe d'ancrage (insertion après).
+        para_idx: Index dans flat_paras (ou doc.paragraphs si flat_paras=None).
         subtitle: Texte du sous-titre (ignoré si vide).
         text: Corps de la clause.
         author: Nom affiché dans la bulle de révision.
         subtitle_config: Dict décrivant le format du sous-titre (voir ci-dessus).
         text_style: Style Word du corps de clause (ex. "Normal"). None = défaut.
+        flat_paras: Liste plate produite par collect_paragraphs(). Recommandé.
     """
-    anchor = doc.paragraphs[para_idx]._p
+    # Élément XML ancre — l'insertion se fait via addnext() juste après lui
+    if flat_paras is not None:
+        anchor = flat_paras[para_idx]
+    else:
+        anchor = doc.paragraphs[para_idx]._p
+
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     rev_id = _next_revision_id(doc)
 
     cfg = subtitle_config or {}
     sub_type = cfg.get("type", "bold")
 
+    # Construire la liste des paragraphes à insérer (sous-titre + corps)
     items = []
 
     if subtitle and subtitle.strip():
@@ -293,7 +420,9 @@ def insert_clause_after(
         "indent_twips": 0,
     })
 
-    # Insertion en ordre inversé pour que addnext produise l'ordre final correct
+    # Insertion en ordre inversé pour que addnext() produise l'ordre final correct.
+    # addnext(X) insère X immédiatement après l'ancre. En insérant dans l'ordre
+    # [corps, sous-titre] (inversé), le résultat dans le document est [sous-titre, corps].
     for item in reversed(items):
         new_p, rev_id = _make_tracked_paragraph(
             item["text"], author, date_str, rev_id,

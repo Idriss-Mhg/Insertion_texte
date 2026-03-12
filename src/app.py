@@ -12,6 +12,15 @@
 #     Éditeur de clauses. Permet de créer, modifier, renommer, dupliquer et
 #     supprimer les codes d'insertion stockés dans clauses.json.
 #
+# Gestion des deux types de documents .docx rencontrés :
+#   - Documents "classiques"  : paragraphes directement dans <w:body>
+#   - Documents "structurés"  : contenu dans des tableaux (<w:td>) ou des
+#     contrôles de contenu Word (<w:sdt>/<w:sdtContent>)
+#
+#   La variable self._flat_paras (produite par docx_handler.collect_paragraphs)
+#   est la liste de référence des paragraphes. Elle est passée à toutes les
+#   fonctions docx_handler et remplace doc.paragraphs (premier niveau seulement).
+#
 # Dépendances externes : tkinterweb (prévisualisation HTML), python-docx, lxml.
 # =============================================================================
 
@@ -88,6 +97,13 @@ class App(tk.Tk):
         # Document .docx actuellement ouvert (instance python-docx Document)
         self._doc = None
 
+        # Liste plate de tous les éléments <w:p> du document courant, en ordre
+        # de lecture. Inclut les paragraphes dans les tableaux (w:td) et les
+        # contrôles de contenu (w:sdt), contrairement à doc.paragraphs qui ne
+        # retourne que les paragraphes de premier niveau.
+        # Produite par docx_handler.collect_paragraphs() à chaque chargement.
+        self._flat_paras: list = []
+
         # Dossier de travail sélectionné par l'utilisateur
         self._folder: Path | None = None
 
@@ -100,9 +116,9 @@ class App(tk.Tk):
         # Index du fichier courant dans _queue (-1 = aucun fichier chargé)
         self._queue_idx: int = -1
 
-        # Mapping position_listbox → index_paragraphe dans le document courant.
+        # Mapping position_listbox → index dans self._flat_paras.
         # Nécessaire car la listbox n'affiche pas forcément tous les paragraphes
-        # (filtrage par recherche possible).
+        # (filtrage par la recherche possible). Maintenu par _populate_listbox().
         self._para_indices: list[int] = []
 
         self._build_ui()
@@ -626,8 +642,12 @@ class App(tk.Tk):
         Charge le fichier courant (self._queue[self._queue_idx]) :
           1. Crée une sauvegarde _old.docx dans _sauvegardes/
           2. Ouvre le document avec python-docx
-          3. Met à jour les widgets de navigation et de statut
-          4. Vide la listbox et rafraîchit la prévisualisation
+          3. Construit self._flat_paras via collect_paragraphs() — traversée
+             XML complète qui capture les paragraphes dans les tableaux (w:td)
+             et les contrôles de contenu (w:sdt), en plus des paragraphes
+             de premier niveau. C'est la liste de référence utilisée partout.
+          4. Met à jour les widgets de navigation et de statut
+          5. Vide la listbox et rafraîchit la prévisualisation
         """
         path = self._queue[self._queue_idx]
         try:
@@ -642,9 +662,11 @@ class App(tk.Tk):
         self._lbl_progress.config(text=f"{pos} / {total}")
         self._btn_prev.config(state=tk.NORMAL if self._queue_idx > 0 else tk.DISABLED)
         self._btn_next.config(state=tk.NORMAL if self._queue_idx < total - 1 else tk.DISABLED)
+        # Construire la liste plate des paragraphes (tableaux + SDT inclus)
+        self._flat_paras = docx_handler.collect_paragraphs(self._doc)
         self._listbox.delete(0, tk.END)
         self._para_indices = []
-        self._status(f"Fichier chargé. Sauvegarde dans {BACKUP_FOLDER_NAME}/")
+        self._status(f"Fichier chargé — {len(self._flat_paras)} paragraphes. Sauvegarde dans {BACKUP_FOLDER_NAME}/")
         self._refresh_preview()
 
     def _next_file(self):
@@ -707,7 +729,7 @@ class App(tk.Tk):
             self._show_all()
             return
 
-        results = docx_handler.search_paragraphs(self._doc, keyword)
+        results = docx_handler.search_paragraphs(self._doc, keyword, flat_paras=self._flat_paras)
         if not results:
             messagebox.showinfo("Aucun résultat", f"Mot-clé « {keyword} » introuvable.")
             return
@@ -717,7 +739,7 @@ class App(tk.Tk):
         displayed: list[tuple[int, str]] = []
         seen: set[int] = set()
         for (center_idx, _) in results:
-            for (i, text) in docx_handler.get_paragraphs_around(self._doc, center_idx):
+            for (i, text) in docx_handler.get_paragraphs_around(self._doc, center_idx, flat_paras=self._flat_paras):
                 if i not in seen:
                     seen.add(i)
                     displayed.append((i, text))
@@ -731,7 +753,7 @@ class App(tk.Tk):
         if not self._doc:
             messagebox.showwarning("Attention", "Ouvrez d'abord un dossier.")
             return
-        self._populate_listbox(docx_handler.get_all_paragraphs(self._doc))
+        self._populate_listbox(docx_handler.get_all_paragraphs(self._doc, flat_paras=self._flat_paras))
         self._status(f"{len(self._para_indices)} paragraphes affichés.")
 
     def _on_para_select(self, *_):
@@ -786,21 +808,22 @@ class App(tk.Tk):
           - Poids de base = max(1, len(texte) / 80)  [~80 caractères par ligne]
           - Bonus heading  = +2.0 lignes             [marge CSS margin-top: 1.2em]
 
+        Utilise self._flat_paras pour être cohérent avec la listbox et la
+        prévisualisation (les paragraphes dans les tableaux/SDT sont inclus).
+
         Args:
-            highlight_idx: Index du paragraphe cible dans doc.paragraphs.
+            highlight_idx: Index du paragraphe cible dans self._flat_paras.
 
         Returns:
             Fraction entre 0.0 et 0.99 à passer à yview_moveto().
         """
-        _heading_keys = {"heading", "titre", "title"}
         weights: list[tuple[int, float]] = []
 
-        for i, para in enumerate(self._doc.paragraphs):
-            text = para.text.strip()
+        for i, p_elem in enumerate(self._flat_paras):
+            text = docx_handler._para_text(p_elem).strip()
             if not text:
                 continue
-            style = (para.style.name or "").lower() if para.style else ""
-            is_heading = any(k in style for k in _heading_keys)
+            is_heading = docx_handler._para_html_tag(p_elem) != "p"
             lines = max(1.0, len(text) / 80)
             weight = lines + (2.0 if is_heading else 0.0)
             weights.append((i, weight))
@@ -831,7 +854,7 @@ class App(tk.Tk):
         if not self._doc:
             return
         try:
-            html_body = docx_handler.build_html(self._doc, highlight_idx=highlight_idx)
+            html_body = docx_handler.build_html(self._doc, highlight_idx=highlight_idx, flat_paras=self._flat_paras)
             html = (
                 f"<!DOCTYPE html><html><head>"
                 f'<meta charset="utf-8">'
@@ -892,7 +915,8 @@ class App(tk.Tk):
         try:
             docx_handler.insert_clause_after(
                 self._doc, para_idx, subtitle, clause_text, author,
-                subtitle_config=subtitle_config, text_style=text_style
+                subtitle_config=subtitle_config, text_style=text_style,
+                flat_paras=self._flat_paras,
             )
             docx_handler.save_document(self._doc, filepath)
             logger.log_insertion(filepath, self._fund_var.get(), para_idx, subtitle, clause_text)

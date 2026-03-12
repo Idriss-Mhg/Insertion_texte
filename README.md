@@ -34,6 +34,7 @@ précisément du point d'insertion, fichier par fichier.
 - **Affichage tout** : affiche l'intégralité des paragraphes du document sans filtre
 - **Point d'insertion** : cliquer sur un paragraphe dans la listbox = insérer la clause **après** ce paragraphe
 - **Prévisualisation HTML** : rendu du document en temps réel à droite ; le paragraphe sélectionné est mis en évidence (fond jaune, barre orange) avec scroll automatique
+- **Compatibilité documents structurés** : les paragraphes dans des tableaux (`w:td`) ou des contrôles de contenu Word (`w:sdt`) sont détectés et affichés — fonctionne même si la quasi-totalité du contenu est dans des structures imbriquées
 - **Mode révision Word (Track Changes)** : toute insertion est balisée `<w:ins>` dans le XML OOXML — elle apparaît en mode révision dans Word, avec le nom de l'auteur et la date
 - **Champ Auteur** : le nom saisi est affiché dans la bulle de révision Word (défaut : « Juriste »)
 - **Insertion** : écrase le `.docx` original, journalise l'opération, passe au fichier suivant
@@ -248,6 +249,31 @@ par `python-docx`. On manipule directement le XML Office Open XML sous-jacent vi
 chaque nouveau paragraphe est construit comme un élément `<w:p>` et inséré via
 `addnext()` sur l'élément ancre. Pour respecter l'ordre final (sous-titre puis corps),
 les éléments sont insérés dans l'ordre inversé.
+
+### Documents structurés (tableaux et content controls)
+
+`python-docx` expose `doc.paragraphs` qui ne retourne que les paragraphes enfants
+directs de `<w:body>`. Les paragraphes imbriqués dans des tableaux (`w:tbl > w:tr > w:tc`)
+ou des contrôles de contenu Word (`w:sdt > w:sdtContent`) n'y apparaissent pas — la
+prévisualisation serait vide pour ces documents.
+
+L'outil résout cela avec `collect_paragraphs(doc)` :
+
+```python
+list(doc.element.body.iter(qn('w:p')))
+```
+
+`iter()` fait une traversée en profondeur du XML et retourne **tous** les `<w:p>`
+dans l'ordre de lecture, quelle que soit leur profondeur d'imbrication.
+
+La liste résultante (`flat_paras`) est la référence unique utilisée pour :
+- l'affichage dans la listbox
+- la recherche de mot-clé
+- la prévisualisation HTML (avec highlight)
+- le calcul de la fraction de scroll
+- l'ancre d'insertion (`addnext()`)
+
+Les deux types de documents sont ainsi traités de façon identique.
 
 ### Prévisualisation HTML
 
