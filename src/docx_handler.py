@@ -1138,9 +1138,9 @@ def _update_dates_in_doc(
     Si la date trouvée est déjà celle d'aujourd'hui, aucune modification n'est
     effectuée (évite les révisions inutiles).
 
-    Plusieurs sections peuvent partager le même footer XML (lié au précédent) :
-    on déduplique par identité de l'élément <w:ftr> pour ne le traiter qu'une
-    seule fois.
+    Les footers sont accédés via les relations du document (doc.part.rels) plutôt
+    que via section.footer, ce qui évite les échecs sur les sections liées au
+    précédent. Les parties footer dupliquées sont dédupliquées par identité XML.
 
     Returns:
         {"body": bool, "footer": bool} — True si le pattern a été trouvé
@@ -1169,12 +1169,15 @@ def _update_dates_in_doc(
             break  # première occurrence seulement
 
     # ── Footer : "mise à jour le" ─────────────────────────────────────────────
+    # Accès direct aux parties footer via les relations du document.
+    # Plus robuste que section.footer._element qui échoue silencieusement
+    # sur les sections "liées au précédent" (footer sans propre <w:ftr>).
+    # Couvre les trois types de footer : défaut, première page, pages paires.
     seen_ftr = set()
-    for section in doc.sections:
-        try:
-            ftr_el = section.footer._element
-        except Exception:
+    for rel in doc.part.rels.values():
+        if 'footer' not in rel.reltype.lower():
             continue
+        ftr_el = rel.target_part._element
         if id(ftr_el) in seen_ftr:
             continue
         seen_ftr.add(id(ftr_el))
