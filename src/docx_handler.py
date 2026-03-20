@@ -54,10 +54,16 @@ INDENT_LEVELS: dict[int, int] = {1: 720, 2: 1440, 3: 2160}
 # profondeur dans le document XML.
 #
 # Helpers de style (nécessitent un objet Document python-docx) :
-#   _resolve_style_id   : nom affiché → identifiant OOXML (ex. "Heading 3" → "Heading3")
-#   get_para_style_name : lit l'ID de style d'un <w:p> lxml
-#   _is_heading_style   : détecte si un ID de style est un titre
-#   get_body_style_near : cherche le style de corps le plus proche d'un ancre-titre
+#   _resolve_style_id      : nom affiché → identifiant OOXML (ex. "Heading 3" → "Heading3")
+#   get_para_style_name    : lit l'ID de style d'un <w:p> lxml
+#   _is_heading_style      : détecte si un ID de style est un titre
+#   get_body_style_near    : cherche le style de corps le plus proche d'un ancre-titre
+#   get_para_run_font_size : lit la taille effective des runs (overrides run-level vs style)
+#   _find_body_para_near   : comme get_body_style_near mais retourne l'élément <w:p>
+#
+# Helpers date :
+#   _collect_visible_runs : collecte récursive des runs visibles (hors <w:del>)
+#   _visible_runs         : API publique de collecte des runs visibles
 # =============================================================================
 
 def _para_text(p_elem) -> str:
@@ -145,6 +151,57 @@ def get_body_style_near(flat_paras: list, anchor_idx: int) -> str:
         if style and not _is_heading_style(style):
             return style
     return ''
+
+
+def get_para_run_font_size(para_el) -> int:
+    """
+    Lit la taille de police effective (en points) du premier run visible non vide.
+
+    En OOXML, la taille peut être définie au niveau du run (w:r/w:rPr/w:sz)
+    plutôt qu'au niveau du style. Ce cas est courant quand la mise en forme a
+    été appliquée manuellement. Un paragraphe peut donc avoir le style "Normal"
+    (10pt) mais afficher du texte en 11pt via des overrides de run.
+
+    Retourne 0 si aucune taille n'est définie explicitement dans les runs
+    (le paragraphe hérite alors de la taille définie par son style Word).
+
+    OOXML exprime la taille en demi-points : w:sz val="22" → 11 pt.
+    """
+    for run_el, text in _visible_runs(para_el):
+        if not text.strip():
+            continue
+        rPr = run_el.find(qn('w:rPr'))
+        if rPr is not None:
+            sz = rPr.find(qn('w:sz'))
+            if sz is not None:
+                val = sz.get(qn('w:val'), '')
+                if val.isdigit():
+                    return int(val) // 2  # demi-points → points
+    return 0
+
+
+def _find_body_para_near(flat_paras: list, anchor_idx: int):
+    """
+    Retourne le premier élément <w:p> de corps de texte (non-titre, non vide)
+    au voisinage de anchor_idx.
+
+    Même logique de scan que get_body_style_near, mais retourne l'élément
+    <w:p> complet plutôt que son ID de style — permet de lire ses propriétés
+    (notamment la taille de police des runs).
+    """
+    for i in range(anchor_idx - 1, -1, -1):
+        if not _para_text(flat_paras[i]).strip():
+            continue
+        style = get_para_style_name(flat_paras[i])
+        if style and not _is_heading_style(style):
+            return flat_paras[i]
+    for i in range(anchor_idx + 1, len(flat_paras)):
+        if not _para_text(flat_paras[i]).strip():
+            continue
+        style = get_para_style_name(flat_paras[i])
+        if style and not _is_heading_style(style):
+            return flat_paras[i]
+    return None
 
 
 def _para_html_tag(p_elem) -> str:
@@ -580,13 +637,22 @@ def insert_clause_after(
     # le premier style de corps de texte dans les paragraphes environnants.
     if text_style == "auto":
         anchor_style = get_para_style_name(anchor)
+        paras = flat_paras if flat_paras is not None else [p._p for p in doc.paragraphs]
         if anchor_style and _is_heading_style(anchor_style):
-            paras = flat_paras if flat_paras is not None else [p._p for p in doc.paragraphs]
             resolved_text_style = get_body_style_near(paras, para_idx) or None
+            # Taille de police : lire depuis le paragraphe corps voisin si non forcée
+            if text_font_size == 0:
+                body_para = _find_body_para_near(paras, para_idx)
+                effective_text_font = get_para_run_font_size(body_para) if body_para is not None else 0
+            else:
+                effective_text_font = text_font_size
         else:
             resolved_text_style = anchor_style or None
+            # Taille de police : lire depuis l'ancre si non forcée
+            effective_text_font = text_font_size if text_font_size else get_para_run_font_size(anchor)
     else:
         resolved_text_style = _resolve_style_id(doc, text_style) if text_style else None
+        effective_text_font = text_font_size  # style explicite : respecter la valeur de l'utilisateur
 
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     rev_id = _next_revision_id(doc)
@@ -636,7 +702,7 @@ def insert_clause_after(
     items.append({
         "text": text.strip(),
         "bold": False, "underline": False,
-        "font_size": text_font_size,
+        "font_size": effective_text_font,
         "style_name": resolved_text_style,
         "indent_twips": 0,
     })
@@ -785,13 +851,20 @@ def insert_clause_plain_after(
     # le premier style de corps de texte dans les paragraphes environnants.
     if text_style == "auto":
         anchor_style = get_para_style_name(anchor)
+        paras = flat_paras if flat_paras is not None else [p._p for p in doc.paragraphs]
         if anchor_style and _is_heading_style(anchor_style):
-            paras = flat_paras if flat_paras is not None else [p._p for p in doc.paragraphs]
             resolved_text_style = get_body_style_near(paras, para_idx) or None
+            if text_font_size == 0:
+                body_para = _find_body_para_near(paras, para_idx)
+                effective_text_font = get_para_run_font_size(body_para) if body_para is not None else 0
+            else:
+                effective_text_font = text_font_size
         else:
             resolved_text_style = anchor_style or None
+            effective_text_font = text_font_size if text_font_size else get_para_run_font_size(anchor)
     else:
         resolved_text_style = _resolve_style_id(doc, text_style) if text_style else None
+        effective_text_font = text_font_size
 
     cfg = subtitle_config or {}
     sub_type = cfg.get("type", "bold")
@@ -836,7 +909,7 @@ def insert_clause_plain_after(
     items.append({
         "text": text.strip(),
         "bold": False, "underline": False,
-        "font_size": text_font_size,
+        "font_size": effective_text_font,
         "style_name": resolved_text_style,
         "indent_twips": 0,
     })
@@ -871,22 +944,33 @@ def insert_clause_plain_after(
 _DATE_RE = re.compile(r'\d{2}/\d{2}/\d{4}')
 
 
+def _collect_visible_runs(el, result: list) -> None:
+    """
+    Collecte récursivement les runs visibles dans el, en ignorant <w:del>.
+
+    Appelé par _visible_runs pour traverser les structures imbriquées :
+    <w:hyperlink>, <w:ins>, <w:sdt>, <w:sdtContent>, etc.
+    """
+    for child in el:
+        if child.tag == qn('w:del'):
+            continue  # texte supprimé — invisible dans le document
+        if child.tag == qn('w:r'):
+            t = child.find(qn('w:t'))
+            result.append((child, t.text or '' if t is not None else ''))
+        else:
+            _collect_visible_runs(child, result)
+
+
 def _visible_runs(p_elem) -> list[tuple]:
     """
     Retourne la liste des (run_el, texte) pour les runs visibles du paragraphe.
 
-    Inclut les <w:r> directs et ceux à l'intérieur de <w:ins> (contenu déjà
-    accepté). Exclut les <w:r> à l'intérieur de <w:del> (texte supprimé).
+    Récurse dans tous les éléments enfants sauf <w:del> (texte supprimé).
+    Couvre les runs directs, dans <w:ins>, <w:hyperlink>, <w:sdt>, etc.
+    Les runs dans <w:del> sont exclus car ils représentent du texte supprimé.
     """
     result = []
-    for child in p_elem:
-        if child.tag == qn('w:r'):
-            t = child.find(qn('w:t'))
-            result.append((child, t.text or '' if t is not None else ''))
-        elif child.tag == qn('w:ins'):
-            for r in child.findall(qn('w:r')):
-                t = r.find(qn('w:t'))
-                result.append((r, t.text or '' if t is not None else ''))
+    _collect_visible_runs(p_elem, result)
     return result
 
 
@@ -894,9 +978,10 @@ def _find_date_run(p_elem):
     """
     Cherche un pattern JJ/MM/AAAA dans les runs visibles du paragraphe.
 
-    La date doit être entièrement contenue dans un seul run (cas habituel pour
-    les dates générées automatiquement). Si elle s'étale sur plusieurs runs,
-    retourne None.
+    La recherche est effectuée dans le texte combiné de tous les runs visibles
+    (y compris les runs dans <w:hyperlink>, <w:ins>, <w:sdt>…). La date doit
+    être entièrement contenue dans un seul run pour permettre le remplacement.
+    Si elle s'étale sur plusieurs runs, retourne None.
 
     Returns:
         (run_el, start_in_run, end_in_run, old_date_str) ou None.
