@@ -1132,8 +1132,8 @@ def _update_dates_in_doc(
 
     Cherche :
       - Corps  : premier paragraphe contenant "Date de publication"
-      - Footer : premier paragraphe de footer contenant "mise à jour le"
-        (insensible à la casse, couvre "Dernière mise à jour le")
+      - Footer : premier paragraphe de footer contenant une date DD/MM/AAAA
+        (pas de filtre textuel — évite les problèmes d'encodage de "à")
 
     Si la date trouvée est déjà celle d'aujourd'hui, aucune modification n'est
     effectuée (évite les révisions inutiles).
@@ -1168,31 +1168,35 @@ def _update_dates_in_doc(
             result["body"] = True
             break  # première occurrence seulement
 
-    # ── Footer : "mise à jour le" ─────────────────────────────────────────────
-    # Accès direct aux parties footer via les relations du document.
-    # Plus robuste que section.footer._element qui échoue silencieusement
-    # sur les sections "liées au précédent" (footer sans propre <w:ftr>).
-    # Couvre les trois types de footer : défaut, première page, pages paires.
+    # ── Footer : première date DD/MM/AAAA trouvée dans n'importe quel footer ──
+    # Approche par sections (API standard python-docx). Certaines sections n'ont
+    # pas de footer propre (liées au précédent) : section.footer._element vaut
+    # None dans ce cas — on les ignore.
+    # Le filtre textuel ("mise à jour le") est volontairement absent : les
+    # variantes d'encodage de "à" causaient des faux négatifs. La première date
+    # DD/MM/AAAA trouvée dans les paragraphes du footer est remplacée.
     seen_ftr = set()
-    for rel in doc.part.rels:
-        if 'footer' not in rel.reltype.lower():
+    for section in doc.sections:
+        try:
+            ftr_el = section.footer._element
+        except Exception:
             continue
-        ftr_el = rel.target_part._element
+        if ftr_el is None:
+            continue
         if id(ftr_el) in seen_ftr:
             continue
         seen_ftr.add(id(ftr_el))
 
         for p_el in ftr_el.iter(qn('w:p')):
-            if "mise à jour le" in _para_text(p_el).lower():
-                found = _find_date_run(p_el)
-                if found:
-                    run_el, _, _, old_date = found
-                    if old_date != today:
-                        if tracked:
-                            rev_id = _replace_date_in_run_tracked(
-                                run_el, old_date, today, author, date_utc, rev_id)
-                        else:
-                            _replace_date_in_run_plain(run_el, old_date, today)
+            found = _find_date_run(p_el)
+            if found:
+                run_el, _, _, old_date = found
+                if old_date != today:
+                    if tracked:
+                        rev_id = _replace_date_in_run_tracked(
+                            run_el, old_date, today, author, date_utc, rev_id)
+                    else:
+                        _replace_date_in_run_plain(run_el, old_date, today)
                 result["footer"] = True
                 break
 

@@ -1121,7 +1121,7 @@ class App(tk.Tk):
                     f"Aucune date de publication n'a été trouvée dans « {filename} ».\n\n"
                     "Patterns recherchés :\n"
                     "  • Corps   : paragraphe contenant « Date de publication »\n"
-                    "  • Footer  : paragraphe contenant « mise à jour le »\n\n"
+                    "  • Footer  : première date DD/MM/AAAA dans le footer\n\n"
                     "La clause a bien été insérée."
                 )
 
