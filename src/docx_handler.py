@@ -54,7 +54,8 @@ INDENT_LEVELS: dict[int, int] = {1: 720, 2: 1440, 3: 2160}
 # profondeur dans le document XML.
 #
 # Helpers de style (nécessitent un objet Document python-docx) :
-#   _resolve_style_id      : nom affiché → identifiant OOXML (ex. "Heading 3" → "Heading3")
+#   _resolve_style_id         : nom affiché → identifiant OOXML (correspondance exacte)
+#   _resolve_heading_style_id : idem + fallback par niveau si style absent du document
 #   get_para_style_name    : lit l'ID de style d'un <w:p> lxml
 #   _is_heading_style      : détecte si un ID de style est un titre
 #   get_body_style_near    : cherche le style de corps le plus proche d'un ancre-titre
@@ -121,6 +122,41 @@ def _resolve_style_id(doc: Document, style_name: str) -> str:
         if style.name == style_name:
             return style.style_id
     return style_name
+
+
+def _resolve_heading_style_id(doc: Document, style_name: str) -> str:
+    """
+    Résout le nom d'un style de titre en son identifiant OOXML, avec fallback
+    inter-familles de styles.
+
+    Étape 1 — correspondance exacte par nom (comme _resolve_style_id).
+    Étape 2 — si le style n'existe pas dans ce document (ex. "Heading 3" dans
+               un template AMF qui ne possède que "APU_Heading 3"), cherche un
+               style de titre au même niveau numérique dans le document cible.
+
+    Exemples :
+        "Heading 3"     dans un doc AMF  → trouve "APU_Heading 3" → "APUHeading3"
+        "APU_Heading 3" dans un doc AMF  → trouvé directement      → "APUHeading3"
+        "APU_Heading 3" dans un doc classique → trouve "Heading 3" → "Heading3"
+
+    Cela permet de configurer une clause avec "Heading 3" et de l'insérer
+    correctement dans les deux familles de documents sans dupliquer les codes.
+    """
+    # Correspondance exacte par nom affiché
+    for style in doc.styles:
+        if style.name == style_name:
+            return style.style_id
+
+    # Le style est absent de ce document — fallback par niveau numérique
+    m = re.search(r'\d+$', style_name.strip())
+    if m:
+        level = m.group()
+        for style in doc.styles:
+            sname = style.name.lower()
+            if any(k in sname for k in _HEADING_KEYWORDS) and sname.endswith(level):
+                return style.style_id
+
+    return style_name  # dernier recours : retourner le nom tel quel
 
 
 def get_body_style_near(flat_paras: list, anchor_idx: int) -> str:
@@ -669,7 +705,7 @@ def insert_clause_after(
                 "text": subtitle.strip(),
                 "bold": False, "underline": False,
                 "font_size": subtitle_font_size,
-                "style_name": _resolve_style_id(doc, cfg.get("style", "Heading 3")),
+                "style_name": _resolve_heading_style_id(doc, cfg.get("style", "Heading 3")),
                 "indent_twips": 0,
             })
         elif sub_type == "puce":
@@ -876,7 +912,7 @@ def insert_clause_plain_after(
                 "text": subtitle.strip(),
                 "bold": False, "underline": False,
                 "font_size": subtitle_font_size,
-                "style_name": _resolve_style_id(doc, cfg.get("style", "Heading 3")),
+                "style_name": _resolve_heading_style_id(doc, cfg.get("style", "Heading 3")),
                 "indent_twips": 0,
             })
         elif sub_type == "puce":
