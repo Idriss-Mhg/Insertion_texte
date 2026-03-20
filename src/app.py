@@ -8,9 +8,16 @@
 #     fichiers .docx, navigue de fichier en fichier, recherche une section,
 #     sélectionne le point d'insertion et insère la clause choisie.
 #
+#     À chaque clic "Insérer" :
+#       1. Insertion de la clause (Track Changes puis texte brut)
+#       2. Mise à jour automatique des dates de publication dans les deux
+#          fichiers de sortie (corps "Date de publication" + footer "mise à
+#          jour le"). Popup d'avertissement si aucune date trouvée.
+#
 #   Onglet "Clauses" :
-#     Éditeur de clauses. Permet de créer, modifier, renommer, dupliquer et
-#     supprimer les codes d'insertion stockés dans clauses.json.
+#     Éditeur de clauses avec aperçu HTML en temps réel. Permet de créer,
+#     modifier, renommer, dupliquer et supprimer les codes d'insertion
+#     stockés dans clauses.json.
 #
 # Gestion des deux types de documents .docx rencontrés :
 #   - Documents "classiques"  : paragraphes directement dans <w:body>
@@ -21,9 +28,16 @@
 #   est la liste de référence des paragraphes. Elle est passée à toutes les
 #   fonctions docx_handler et remplace doc.paragraphs (premier niveau seulement).
 #
+# Style "auto" pour le corps de clause :
+#   Quand text_style == "auto", le style est hérité du paragraphe d'ancrage.
+#   Exception : si l'ancre est un titre (Heading, APU_Heading…), on remonte
+#   aux paragraphes voisins pour trouver le style de corps de texte réel
+#   (évite d'insérer le corps de clause en police titre).
+#
 # Dépendances externes : tkinterweb (prévisualisation HTML), python-docx, lxml.
 # =============================================================================
 
+import html as _html
 import json
 import tkinter as tk
 from pathlib import Path
@@ -98,6 +112,11 @@ class App(tk.Tk):
 
         # Document .docx actuellement ouvert (instance python-docx Document)
         self._doc = None
+
+        # Widget HtmlFrame de prévisualisation dans l'onglet Clauses.
+        # Initialisé à None ici pour permettre les appels anticipés dans
+        # _on_type_select avant que le widget soit réellement créé.
+        self._clause_preview = None
 
         # Liste plate de tous les éléments <w:p> du document courant, en ordre
         # de lecture. Inclut les paragraphes dans les tableaux (w:td) et les
@@ -269,9 +288,9 @@ class App(tk.Tk):
         row_ts = ttk.Frame(f_clause)
         row_ts.pack(fill=tk.X, padx=6, pady=(2, 0))
         ttk.Label(row_ts, text="Style texte :").pack(side=tk.LEFT)
-        self._text_style_var = tk.StringVar(value="Normal")
+        self._text_style_var = tk.StringVar(value="auto")
         ttk.Combobox(row_ts, textvariable=self._text_style_var, width=20,
-                     values=["Normal", "Corps de texte", "Body Text",
+                     values=["auto", "Normal", "Corps de texte", "Body Text",
                              "Heading 4", "Titre 4"]).pack(side=tk.LEFT, padx=6)
 
         ttk.Label(f_clause, text="Texte de la clause :").pack(anchor=tk.W, padx=6, pady=(4, 0))
@@ -406,7 +425,8 @@ class App(tk.Tk):
         f_right = ttk.LabelFrame(parent, text="Édition")
         f_right.grid(row=0, column=1, sticky="nsew", padx=(4, 8), pady=8)
         f_right.columnconfigure(1, weight=1)
-        f_right.rowconfigure(6, weight=1)  # La zone de texte occupe l'espace restant
+        f_right.rowconfigure(6, weight=2)  # Éditeur de texte (plus de place)
+        f_right.rowconfigure(9, weight=1)  # Aperçu de la clause
 
         ttk.Label(f_right, text="Code :").grid(row=0, column=0, sticky="w", padx=8, pady=(8, 4))
         self._edit_name_var = tk.StringVar()
@@ -455,9 +475,9 @@ class App(tk.Tk):
         f_ts = ttk.Frame(f_right)
         f_ts.grid(row=3, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 4))
         ttk.Label(f_ts, text="Style texte :").pack(side=tk.LEFT)
-        self._edit_text_style_var = tk.StringVar(value="Normal")
+        self._edit_text_style_var = tk.StringVar(value="auto")
         ttk.Combobox(f_ts, textvariable=self._edit_text_style_var, width=20,
-                     values=["Normal", "Corps de texte", "Body Text",
+                     values=["auto", "Normal", "Corps de texte", "Body Text",
                              "Heading 4", "Titre 4"]).pack(side=tk.LEFT, padx=6)
 
         # ── Tailles de police ─────────────────────────────────────────────────
@@ -489,10 +509,36 @@ class App(tk.Tk):
         self._lbl_clause_status = ttk.Label(f_form_btns, text="", foreground="gray")
         self._lbl_clause_status.pack(side=tk.LEFT)
 
+        # ── Aperçu de la clause ───────────────────────────────────────────────
+        # Rendu HTML en temps réel : sous-titre dans son format + extrait du corps.
+        # Ne nécessite pas de document chargé — utilise une approximation CSS.
+        ttk.Label(f_right, text="Aperçu :").grid(
+            row=8, column=0, sticky="w", padx=8, pady=(4, 0))
+        self._clause_preview = HtmlFrame(f_right, messages_enabled=False)
+        self._clause_preview.grid(
+            row=9, column=0, columnspan=3, sticky="nsew", padx=8, pady=(0, 8))
+
         # Nom du code en cours d'édition (None si création d'un nouveau code)
         self._clause_editing_original_name: str | None = None
 
         self._refresh_type_listbox()
+
+        # Traces pour mise à jour en temps réel de l'aperçu.
+        # Les traces sont installées après _refresh_type_listbox() pour éviter
+        # tout appel sur un widget non encore créé.
+        for var in (
+            self._edit_subtitle_var, self._edit_subtitle_type_var,
+            self._edit_subtitle_style_var, self._edit_subtitle_bullet_var,
+            self._edit_text_style_var,
+        ):
+            var.trace_add("write", lambda *_: self._update_clause_preview())
+        for var in (
+            self._edit_subtitle_font_size_var, self._edit_text_font_size_var,
+            self._edit_subtitle_indent_var,
+        ):
+            var.trace_add("write", lambda *_: self._update_clause_preview())
+        self._edit_txt.bind("<KeyRelease>", lambda _: self._update_clause_preview())
+        self._update_clause_preview()
 
     # =========================================================================
     # Logique de l'éditeur de clauses (onglet 2)
@@ -530,17 +576,112 @@ class App(tk.Tk):
         self._edit_subtitle_bullet_var.set(data.get("subtitle_bullet", "•"))
         self._edit_subtitle_indent_var.set(data.get("subtitle_indent", 1))
         self._edit_subtitle_font_size_var.set(data.get("subtitle_font_size", 0))
-        self._edit_text_style_var.set(data.get("text_style", "Normal"))
+        self._edit_text_style_var.set(data.get("text_style", "auto"))
         self._edit_text_font_size_var.set(data.get("text_font_size", 0))
         self._edit_txt.delete("1.0", tk.END)
         self._edit_txt.insert("1.0", data.get("text", ""))
         self._on_edit_subtitle_type_change()
         self._lbl_clause_status.config(text="")
+        self._update_clause_preview()
 
     def _on_edit_subtitle_type_change(self, *_):
         """Active/désactive le combobox style Word dans l'éditeur de clauses."""
         t = self._edit_subtitle_type_var.get()
         self._edit_cb_style.config(state="normal" if t == "style" else "disabled")
+        self._update_clause_preview()
+
+    def _update_clause_preview(self):
+        """Régénère l'aperçu HTML de la clause dans l'onglet Clauses."""
+        if self._clause_preview is None:
+            return
+        self._clause_preview.load_html(self._build_clause_preview_html())
+
+    def _build_clause_preview_html(self) -> str:
+        """
+        Génère un fragment HTML illustrant la clause en cours d'édition :
+          - Sous-titre rendu selon son type (gras / souligné / heading / puce)
+          - Corps de clause tronqué à 300 caractères
+          - Note de style en gris italic (nom du style ou "style hérité" si auto)
+
+        Utilise des approximations CSS car aucun document Word n'est chargé
+        dans l'onglet Clauses. Pour les styles Word (Heading 3, etc.), le
+        niveau de heading est déduit du chiffre présent dans le nom de style.
+        """
+        subtitle   = self._edit_subtitle_var.get().strip()
+        sub_type   = self._edit_subtitle_type_var.get()
+        sub_style  = self._edit_subtitle_style_var.get()
+        sub_bullet = self._edit_subtitle_bullet_var.get()
+        sub_size   = self._edit_subtitle_font_size_var.get()
+        text       = self._edit_txt.get("1.0", tk.END).strip()
+        text_size  = self._edit_text_font_size_var.get()
+        text_style = self._edit_text_style_var.get()
+
+        _CSS = (
+            "body { font-family: Georgia, serif; font-size: 12px; margin: 8px;"
+            "       color: #222; line-height: 1.5; }"
+            "h1   { font-size: 1.4em; font-weight: bold; font-family: Arial, sans-serif;"
+            "       color: #1a1a4e; margin: 2px 0; }"
+            "h2   { font-size: 1.2em; font-weight: bold; font-family: Arial, sans-serif;"
+            "       color: #1a1a4e; margin: 2px 0; }"
+            "h3   { font-size: 1.05em; font-weight: bold; font-family: Arial, sans-serif;"
+            "       color: #1a1a4e; margin: 2px 0; }"
+            "h4   { font-size: 1.0em; font-weight: bold; font-family: Arial, sans-serif;"
+            "       color: #1a1a4e; margin: 2px 0; }"
+            "p    { margin: 4px 0; }"
+            ".note { color: #999; font-style: italic; font-size: 0.82em; }"
+            ".empty { color: #aaa; font-style: italic; }"
+        )
+
+        parts = []
+
+        # ── Sous-titre ────────────────────────────────────────────────────────
+        if subtitle:
+            sz = f"font-size:{sub_size}pt;" if sub_size > 0 else ""
+            esc = _html.escape(subtitle)
+
+            if sub_type == "bold":
+                parts.append(f'<p style="font-weight:bold;{sz}">{esc}</p>')
+
+            elif sub_type == "underline":
+                parts.append(f'<p style="text-decoration:underline;{sz}">{esc}</p>')
+
+            elif sub_type == "style":
+                # Déduit le niveau h1–h4 depuis le chiffre dans le nom de style
+                lvl = 3
+                for n in range(1, 5):
+                    if str(n) in sub_style:
+                        lvl = n
+                        break
+                tag = f"h{lvl}"
+                note = f'<span class="note"> ({_html.escape(sub_style)})</span>'
+                parts.append(f'<{tag} style="{sz}">{esc}{note}</{tag}>')
+
+            elif sub_type == "puce":
+                indent_px = self._edit_subtitle_indent_var.get() * 20
+                parts.append(
+                    f'<p style="margin-left:{indent_px}px;{sz}">'
+                    f'{_html.escape(sub_bullet)} {esc}</p>'
+                )
+
+        # ── Corps de clause ───────────────────────────────────────────────────
+        if text:
+            sz = f"font-size:{text_size}pt;" if text_size > 0 else ""
+            excerpt = _html.escape(text[:300]) + ("…" if len(text) > 300 else "")
+            if text_style == "auto":
+                note = '<span class="note"> [style hérité du paragraphe d\'ancrage]</span>'
+            else:
+                note = f'<span class="note"> [{_html.escape(text_style)}]</span>'
+            parts.append(f'<p style="{sz}">{excerpt}{note}</p>')
+
+        if not parts:
+            body = '<p class="empty">Aperçu vide — saisissez un sous-titre ou un texte.</p>'
+        else:
+            body = "\n".join(parts)
+
+        return (
+            f'<!DOCTYPE html><html><head><meta charset="utf-8">'
+            f'<style>{_CSS}</style></head><body>{body}</body></html>'
+        )
 
     def _clause_new(self):
         """Réinitialise le formulaire pour la saisie d'un nouveau code d'insertion."""
@@ -592,7 +733,7 @@ class App(tk.Tk):
             "subtitle_indent": self._edit_subtitle_indent_var.get(),
             "subtitle_font_size": self._edit_subtitle_font_size_var.get(),
             "text": text,
-            "text_style": self._edit_text_style_var.get().strip() or "Normal",
+            "text_style": self._edit_text_style_var.get().strip() or "auto",
             "text_font_size": self._edit_text_font_size_var.get(),
         }
         original = self._clause_editing_original_name
@@ -756,7 +897,7 @@ class App(tk.Tk):
         self._subtitle_bullet_var.set(data.get("subtitle_bullet", "•"))
         self._subtitle_indent_var.set(data.get("subtitle_indent", 1))
         self._subtitle_font_size_var.set(data.get("subtitle_font_size", 0))
-        self._text_style_var.set(data.get("text_style", "Normal"))
+        self._text_style_var.set(data.get("text_style", "auto"))
         self._text_font_size_var.set(data.get("text_font_size", 0))
         self._txt_clause.delete("1.0", tk.END)
         self._txt_clause.insert("1.0", data.get("text", ""))
@@ -958,6 +1099,7 @@ class App(tk.Tk):
                 subtitle_font_size=subtitle_font_size, text_font_size=text_font_size,
                 flat_paras=flat_tc,
             )
+            date_result = docx_handler.update_dates(doc_tc, author, flat_paras=flat_tc)
             docx_handler.save_document(doc_tc, str(self._tc_dir / filename))
 
             # ── Version texte brut ────────────────────────────────────────────
@@ -969,10 +1111,33 @@ class App(tk.Tk):
                 subtitle_font_size=subtitle_font_size, text_font_size=text_font_size,
                 flat_paras=flat_plain,
             )
+            docx_handler.update_dates_plain(doc_plain, flat_paras=flat_plain)
             docx_handler.save_document(doc_plain, str(self._plain_dir / filename))
 
+            # ── Avertissement si aucune date trouvée ──────────────────────────
+            if not date_result["body"] and not date_result["footer"]:
+                messagebox.showwarning(
+                    "Date non trouvée",
+                    f"Aucune date de publication n'a été trouvée dans « {filename} ».\n\n"
+                    "Patterns recherchés :\n"
+                    "  • Corps   : paragraphe contenant « Date de publication »\n"
+                    "  • Footer  : paragraphe contenant « mise à jour le »\n\n"
+                    "La clause a bien été insérée."
+                )
+
+            # ── Statut ────────────────────────────────────────────────────────
+            date_parts = []
+            if date_result["body"]:
+                date_parts.append("corps")
+            if date_result["footer"]:
+                date_parts.append("footer")
+            date_info = f" + date ({', '.join(date_parts)})" if date_parts else ""
+
             logger.log_insertion(filepath, self._fund_var.get(), para_idx, subtitle, clause_text)
-            self._status(f"Clause insérée après §{para_idx} → {TC_FOLDER_NAME}/ et {PLAIN_FOLDER_NAME}/")
+            self._status(
+                f"Clause insérée après §{para_idx}{date_info}"
+                f" → {TC_FOLDER_NAME}/ et {PLAIN_FOLDER_NAME}/"
+            )
             self._refresh_log()
             self._next_file()
         except Exception as e:

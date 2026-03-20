@@ -7,6 +7,15 @@
 #   - Génération du HTML de prévisualisation (document complet ou fenêtre)
 #   - Insertion de clauses en mode révision (Track Changes / <w:ins>)
 #   - Insertion de clauses en texte brut (sans balisage de révision)
+#   - Mise à jour des dates de publication (corps + footer)
+#
+# Note OOXML — noms de style vs identifiants de style :
+#   Word distingue le nom affiché d'un style ("Heading 3", "APU_Heading 3")
+#   de son identifiant interne ("Heading3", "APUHeading3"). L'attribut
+#   <w:pStyle w:val="..."/> exige l'identifiant, jamais le nom affiché.
+#   _resolve_style_id() effectue cette conversion à partir des métadonnées
+#   du document (doc.styles), ce qui garantit le bon style quel que soit
+#   le template utilisé (classique, APU, RSV…).
 #
 # Deux fichiers de sortie sont produits par insertion :
 #   - _track_changes/<fichier>.docx  : version avec <w:ins> (révision Word)
@@ -24,6 +33,7 @@
 
 import html as _html
 import re
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,6 +52,12 @@ INDENT_LEVELS: dict[int, int] = {1: 720, 2: 1440, 3: 2160}
 # Ces fonctions opèrent directement sur des éléments lxml (pas des objets
 # python-docx), ce qui permet de traiter des paragraphes à n'importe quelle
 # profondeur dans le document XML.
+#
+# Helpers de style (nécessitent un objet Document python-docx) :
+#   _resolve_style_id   : nom affiché → identifiant OOXML (ex. "Heading 3" → "Heading3")
+#   get_para_style_name : lit l'ID de style d'un <w:p> lxml
+#   _is_heading_style   : détecte si un ID de style est un titre
+#   get_body_style_near : cherche le style de corps le plus proche d'un ancre-titre
 # =============================================================================
 
 def _para_text(p_elem) -> str:
@@ -53,6 +69,82 @@ def _para_text(p_elem) -> str:
     "accepté" du document.
     """
     return ''.join(t.text or '' for t in p_elem.iter(qn('w:t')))
+
+
+# Mots-clés identifiant les styles de titre dans les IDs OOXML.
+# Couvre les conventions Word standard ET les variantes maison (APU_Heading, RSV_Heading…).
+_HEADING_KEYWORDS = ('heading', 'titre', 'title', 'rsvsection', 'rsvheading')
+
+
+def get_para_style_name(para_el) -> str:
+    """
+    Retourne l'ID de style OOXML d'un élément <w:p> lxml, ou '' si absent.
+
+    Note : w:pStyle w:val contient l'ID interne (ex. 'APUHeading3', 'Normal'),
+    pas le nom affiché dans Word ('APU_Heading 3'). L'ID est ce qu'on passe
+    à <w:pStyle w:val="..."/> lors de l'insertion.
+    """
+    pPr = para_el.find(qn('w:pPr'))
+    if pPr is not None:
+        pStyle = pPr.find(qn('w:pStyle'))
+        if pStyle is not None:
+            return pStyle.get(qn('w:val'), '')
+    return ''
+
+
+def _is_heading_style(style_id: str) -> bool:
+    """
+    Retourne True si l'ID de style correspond à un titre (toutes familles).
+
+    Exemples détectés : Heading1, Titre2, APUHeading3, RSVHeading1, RSVSection.
+    Exemples non détectés : Normal, APUDefault, BodyText, Descriptif.
+    """
+    sid = style_id.lower()
+    return any(k in sid for k in _HEADING_KEYWORDS)
+
+
+def _resolve_style_id(doc: Document, style_name: str) -> str:
+    """
+    Convertit un nom de style Word affiché (ex. 'Heading 3', 'APU_Heading 3')
+    en son identifiant OOXML (ex. 'Heading3', 'APUHeading3').
+
+    C'est l'ID qui doit figurer dans <w:pStyle w:val="...">, pas le nom affiché.
+    En cas d'échec (style inexistant), retourne style_name tel quel.
+    """
+    for style in doc.styles:
+        if style.name == style_name:
+            return style.style_id
+    return style_name
+
+
+def get_body_style_near(flat_paras: list, anchor_idx: int) -> str:
+    """
+    Cherche le premier style de corps de texte (non-titre, non vide) au
+    voisinage de anchor_idx. Utilisé quand l'ancre est un titre : on hérite
+    du style du corps environnant plutôt que du titre lui-même.
+
+    Stratégie : scan en arrière d'abord (le corps précède souvent le titre
+    suivant), puis en avant si rien trouvé.
+
+    Returns:
+        ID de style (ex. 'APUDefault', 'Normal', 'Descriptif') ou '' si
+        aucun paragraphe de corps trouvé dans tout le document.
+    """
+    # Scan en arrière depuis l'ancre
+    for i in range(anchor_idx - 1, -1, -1):
+        if not _para_text(flat_paras[i]).strip():
+            continue
+        style = get_para_style_name(flat_paras[i])
+        if style and not _is_heading_style(style):
+            return style
+    # Scan en avant si rien trouvé
+    for i in range(anchor_idx + 1, len(flat_paras)):
+        if not _para_text(flat_paras[i]).strip():
+            continue
+        style = get_para_style_name(flat_paras[i])
+        if style and not _is_heading_style(style):
+            return style
+    return ''
 
 
 def _para_html_tag(p_elem) -> str:
@@ -482,6 +574,20 @@ def insert_clause_after(
     else:
         anchor = doc.paragraphs[para_idx]._p
 
+    # Résolution du style "auto" : hérite du style du corps de texte voisin.
+    # Si l'ancre est un titre (Heading, APU_Heading…), on ne copie PAS son style
+    # — ça donnerait une police titre pour le corps de clause. On cherche alors
+    # le premier style de corps de texte dans les paragraphes environnants.
+    if text_style == "auto":
+        anchor_style = get_para_style_name(anchor)
+        if anchor_style and _is_heading_style(anchor_style):
+            paras = flat_paras if flat_paras is not None else [p._p for p in doc.paragraphs]
+            resolved_text_style = get_body_style_near(paras, para_idx) or None
+        else:
+            resolved_text_style = anchor_style or None
+    else:
+        resolved_text_style = _resolve_style_id(doc, text_style) if text_style else None
+
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     rev_id = _next_revision_id(doc)
 
@@ -497,7 +603,7 @@ def insert_clause_after(
                 "text": subtitle.strip(),
                 "bold": False, "underline": False,
                 "font_size": subtitle_font_size,
-                "style_name": cfg.get("style", "Heading 3"),
+                "style_name": _resolve_style_id(doc, cfg.get("style", "Heading 3")),
                 "indent_twips": 0,
             })
         elif sub_type == "puce":
@@ -531,7 +637,7 @@ def insert_clause_after(
         "text": text.strip(),
         "bold": False, "underline": False,
         "font_size": text_font_size,
-        "style_name": text_style or None,
+        "style_name": resolved_text_style,
         "indent_twips": 0,
     })
 
@@ -673,6 +779,20 @@ def insert_clause_plain_after(
     else:
         anchor = doc.paragraphs[para_idx]._p
 
+    # Résolution du style "auto" : hérite du style du corps de texte voisin.
+    # Si l'ancre est un titre (Heading, APU_Heading…), on ne copie PAS son style
+    # — ça donnerait une police titre pour le corps de clause. On cherche alors
+    # le premier style de corps de texte dans les paragraphes environnants.
+    if text_style == "auto":
+        anchor_style = get_para_style_name(anchor)
+        if anchor_style and _is_heading_style(anchor_style):
+            paras = flat_paras if flat_paras is not None else [p._p for p in doc.paragraphs]
+            resolved_text_style = get_body_style_near(paras, para_idx) or None
+        else:
+            resolved_text_style = anchor_style or None
+    else:
+        resolved_text_style = _resolve_style_id(doc, text_style) if text_style else None
+
     cfg = subtitle_config or {}
     sub_type = cfg.get("type", "bold")
     items = []
@@ -683,7 +803,7 @@ def insert_clause_plain_after(
                 "text": subtitle.strip(),
                 "bold": False, "underline": False,
                 "font_size": subtitle_font_size,
-                "style_name": cfg.get("style", "Heading 3"),
+                "style_name": _resolve_style_id(doc, cfg.get("style", "Heading 3")),
                 "indent_twips": 0,
             })
         elif sub_type == "puce":
@@ -717,7 +837,7 @@ def insert_clause_plain_after(
         "text": text.strip(),
         "bold": False, "underline": False,
         "font_size": text_font_size,
-        "style_name": text_style or None,
+        "style_name": resolved_text_style,
         "indent_twips": 0,
     })
 
@@ -731,3 +851,257 @@ def insert_clause_plain_after(
             indent_twips=item["indent_twips"],
         )
         anchor.addnext(new_p)
+
+
+# =============================================================================
+# Mise à jour des dates de publication
+#
+# Deux patterns sont détectés automatiquement dans chaque document :
+#   1. Corps     : paragraphe contenant "Date de publication"
+#                  ex. "Date de publication : 01/01/2026"
+#   2. Footer    : paragraphe contenant "mise à jour le"
+#                  ex. "Dernière mise à jour le 28/11/2025"
+#
+# La date trouvée (format JJ/MM/AAAA) est remplacée par la date du jour.
+# En mode Track Changes : <w:del> (ancienne date) + <w:ins> (nouvelle date),
+# les propriétés de caractère du run original (w:rPr) sont conservées.
+# En mode texte brut : remplacement direct dans <w:t>.
+# =============================================================================
+
+_DATE_RE = re.compile(r'\d{2}/\d{2}/\d{4}')
+
+
+def _visible_runs(p_elem) -> list[tuple]:
+    """
+    Retourne la liste des (run_el, texte) pour les runs visibles du paragraphe.
+
+    Inclut les <w:r> directs et ceux à l'intérieur de <w:ins> (contenu déjà
+    accepté). Exclut les <w:r> à l'intérieur de <w:del> (texte supprimé).
+    """
+    result = []
+    for child in p_elem:
+        if child.tag == qn('w:r'):
+            t = child.find(qn('w:t'))
+            result.append((child, t.text or '' if t is not None else ''))
+        elif child.tag == qn('w:ins'):
+            for r in child.findall(qn('w:r')):
+                t = r.find(qn('w:t'))
+                result.append((r, t.text or '' if t is not None else ''))
+    return result
+
+
+def _find_date_run(p_elem):
+    """
+    Cherche un pattern JJ/MM/AAAA dans les runs visibles du paragraphe.
+
+    La date doit être entièrement contenue dans un seul run (cas habituel pour
+    les dates générées automatiquement). Si elle s'étale sur plusieurs runs,
+    retourne None.
+
+    Returns:
+        (run_el, start_in_run, end_in_run, old_date_str) ou None.
+    """
+    runs = _visible_runs(p_elem)
+    combined = ''.join(text for _, text in runs)
+    m = _DATE_RE.search(combined)
+    if not m:
+        return None
+    pos = 0
+    for run_el, text in runs:
+        run_end = pos + len(text)
+        if pos <= m.start() and m.end() <= run_end:
+            return run_el, m.start() - pos, m.end() - pos, m.group()
+        pos = run_end
+    return None  # date répartie sur plusieurs runs — non supporté
+
+
+def _replace_date_in_run_plain(run_el, old_date: str, new_date: str) -> None:
+    """Remplace old_date par new_date directement dans le <w:t> du run."""
+    t_el = run_el.find(qn('w:t'))
+    if t_el is not None and t_el.text:
+        t_el.text = t_el.text.replace(old_date, new_date, 1)
+
+
+def _replace_date_in_run_tracked(
+    run_el, old_date: str, new_date: str,
+    author: str, date_utc: str, rev_id: int,
+) -> int:
+    """
+    Remplace old_date par new_date dans run_el avec balisage Track Changes.
+
+    Décompose le run en [prefix?] <w:del>ancienne</w:del>
+    <w:ins>nouvelle</w:ins> [suffix?], en conservant les propriétés de
+    caractère (w:rPr) du run original dans tous les nouveaux éléments.
+
+    Returns:
+        Prochain rev_id disponible (consomme 2 IDs : un pour del, un pour ins).
+    """
+    parent    = run_el.getparent()
+    t_el      = run_el.find(qn('w:t'))
+    if t_el is None:
+        return rev_id
+
+    full_text = t_el.text or ''
+    idx = full_text.find(old_date)
+    if idx < 0:
+        return rev_id
+
+    prefix   = full_text[:idx]
+    suffix   = full_text[idx + len(old_date):]
+    rPr_orig = run_el.find(qn('w:rPr'))
+
+    def _make_run(text: str) -> OxmlElement:
+        r = OxmlElement('w:r')
+        if rPr_orig is not None:
+            r.append(deepcopy(rPr_orig))
+        t = OxmlElement('w:t')
+        t.text = text
+        if text and (text[0] == ' ' or text[-1] == ' '):
+            t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+        r.append(t)
+        return r
+
+    def _make_del_run(text: str) -> OxmlElement:
+        r = OxmlElement('w:r')
+        if rPr_orig is not None:
+            r.append(deepcopy(rPr_orig))
+        dt = OxmlElement('w:delText')
+        dt.text = text
+        r.append(dt)
+        return r
+
+    insert_pos = list(parent).index(run_el)
+    elements   = []
+
+    if prefix:
+        elements.append(_make_run(prefix))
+
+    del_el = OxmlElement('w:del')
+    del_el.set(qn('w:id'),     str(rev_id))
+    del_el.set(qn('w:author'), author)
+    del_el.set(qn('w:date'),   date_utc)
+    del_el.append(_make_del_run(old_date))
+    elements.append(del_el)
+
+    ins_el = OxmlElement('w:ins')
+    ins_el.set(qn('w:id'),     str(rev_id + 1))
+    ins_el.set(qn('w:author'), author)
+    ins_el.set(qn('w:date'),   date_utc)
+    ins_el.append(_make_run(new_date))
+    elements.append(ins_el)
+
+    if suffix:
+        elements.append(_make_run(suffix))
+
+    parent.remove(run_el)
+    for i, el in enumerate(elements):
+        parent.insert(insert_pos + i, el)
+
+    return rev_id + 2
+
+
+def _update_dates_in_doc(
+    doc: Document,
+    author: str | None,
+    flat_paras: list | None,
+    tracked: bool,
+) -> dict:
+    """
+    Logique commune de mise à jour des dates (corps + footer).
+
+    Cherche :
+      - Corps  : premier paragraphe contenant "Date de publication"
+      - Footer : premier paragraphe de footer contenant "mise à jour le"
+        (insensible à la casse, couvre "Dernière mise à jour le")
+
+    Si la date trouvée est déjà celle d'aujourd'hui, aucune modification n'est
+    effectuée (évite les révisions inutiles).
+
+    Plusieurs sections peuvent partager le même footer XML (lié au précédent) :
+    on déduplique par identité de l'élément <w:ftr> pour ne le traiter qu'une
+    seule fois.
+
+    Returns:
+        {"body": bool, "footer": bool} — True si le pattern a été trouvé
+        (indépendamment du fait que la date ait été modifiée ou non).
+    """
+    today    = datetime.now().strftime("%d/%m/%Y")
+    date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rev_id   = _next_revision_id(doc) if tracked else 0
+    result   = {"body": False, "footer": False}
+
+    paras = flat_paras if flat_paras is not None else [p._p for p in doc.paragraphs]
+
+    # ── Corps : "Date de publication" ─────────────────────────────────────────
+    for p_el in paras:
+        if "Date de publication" in _para_text(p_el):
+            found = _find_date_run(p_el)
+            if found:
+                run_el, _, _, old_date = found
+                if old_date != today:
+                    if tracked:
+                        rev_id = _replace_date_in_run_tracked(
+                            run_el, old_date, today, author, date_utc, rev_id)
+                    else:
+                        _replace_date_in_run_plain(run_el, old_date, today)
+            result["body"] = True
+            break  # première occurrence seulement
+
+    # ── Footer : "mise à jour le" ─────────────────────────────────────────────
+    seen_ftr = set()
+    for section in doc.sections:
+        try:
+            ftr_el = section.footer._element
+        except Exception:
+            continue
+        if id(ftr_el) in seen_ftr:
+            continue
+        seen_ftr.add(id(ftr_el))
+
+        for p_el in ftr_el.iter(qn('w:p')):
+            if "mise à jour le" in _para_text(p_el).lower():
+                found = _find_date_run(p_el)
+                if found:
+                    run_el, _, _, old_date = found
+                    if old_date != today:
+                        if tracked:
+                            rev_id = _replace_date_in_run_tracked(
+                                run_el, old_date, today, author, date_utc, rev_id)
+                        else:
+                            _replace_date_in_run_plain(run_el, old_date, today)
+                result["footer"] = True
+                break
+
+        if result["footer"]:
+            break
+
+    return result
+
+
+def update_dates(doc: Document, author: str, flat_paras: list | None = None) -> dict:
+    """
+    Met à jour les dates de publication avec Track Changes (<w:del> + <w:ins>).
+
+    Args:
+        doc: Document python-docx (modifié en place).
+        author: Auteur affiché dans les bulles de révision.
+        flat_paras: Liste plate produite par collect_paragraphs(). Recommandé.
+
+    Returns:
+        {"body": bool, "footer": bool} — True si le pattern a été trouvé.
+    """
+    return _update_dates_in_doc(doc, author, flat_paras, tracked=True)
+
+
+def update_dates_plain(doc: Document, flat_paras: list | None = None) -> dict:
+    """
+    Met à jour les dates de publication en texte direct (sans Track Changes).
+
+    Args:
+        doc: Document python-docx (modifié en place).
+        flat_paras: Liste plate produite par collect_paragraphs(). Recommandé.
+
+    Returns:
+        {"body": bool, "footer": bool} — True si le pattern a été trouvé.
+    """
+    return _update_dates_in_doc(doc, None, flat_paras, tracked=False)
