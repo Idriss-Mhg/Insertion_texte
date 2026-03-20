@@ -1174,7 +1174,7 @@ def _update_dates_in_doc(
     # sur les sections "liées au précédent" (footer sans propre <w:ftr>).
     # Couvre les trois types de footer : défaut, première page, pages paires.
     seen_ftr = set()
-    for rel in doc.part.rels.values():
+    for rel in doc.part.rels:
         if 'footer' not in rel.reltype.lower():
             continue
         ftr_el = rel.target_part._element
